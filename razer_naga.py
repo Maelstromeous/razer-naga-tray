@@ -108,9 +108,9 @@ class NagaV2Pro:
         raise MouseAsleep("The mouse did not answer on any receiver.")
 
     @staticmethod
-    def _send(fd, command_class, command_id, data_size, args=()):
+    def _send(fd, command_class, command_id, data_size, args=(), transaction_id=TRANSACTION_ID):
         report = bytearray(REPORT_LEN)
-        report[1] = TRANSACTION_ID
+        report[1] = transaction_id
         report[5], report[6], report[7] = data_size, command_class, command_id
         report[8:8 + len(args)] = bytes(args)
         crc = 0
@@ -190,3 +190,35 @@ class NagaV2Pro:
             except RazerError:
                 result[name] = False
         return result
+
+
+DOCK_TRANSACTION_ID = 0xFF  # 0x1F on the dock is relayed to the mouse; 0xFF is the dock itself
+DOCK_LED = 0x00
+
+
+def dock_command(command_class, command_id, data_size, args=()):
+    """Send one command to the Mouse Dock Pro itself. Returns True if it was accepted."""
+    path = next((p for p, name in find_links() if name == "Mouse Dock Pro"), None)
+    if not path:
+        return False
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except OSError:
+        return False
+    try:
+        status, _ = NagaV2Pro._send(fd, command_class, command_id, data_size, args, DOCK_TRANSACTION_ID)
+        return status == 0x02
+    except OSError:
+        return False  # unplugged mid-write
+    finally:
+        os.close(fd)
+
+
+def dock_set_colour(rgb, brightness=None):
+    """Solid colour on the dock ring, live only. Sent twice: the dock can show the previous colour after one write."""
+    ok = True
+    if brightness is not None:
+        ok &= dock_command(0x0F, 0x04, 0x03, (NOSTORE, DOCK_LED, brightness))
+    for _ in range(2):
+        ok &= dock_command(0x0F, 0x02, 0x09, (NOSTORE, DOCK_LED, 0x01, 0x00, 0x00, 0x01, *rgb))
+    return ok

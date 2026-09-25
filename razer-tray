@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Tray icon for a Razer Naga V2 Pro: battery level, charging state, low-battery notifications."""
+import json
 import os
 import queue
 import select
@@ -15,13 +16,45 @@ from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon  # noqa: E402
 
 from battery_stats import Session  # noqa: E402
 from razer_naga import (DOCK_EVENTS, EVENT_INTERFACE, EVENT_REPORT_ID, MouseAsleep, NagaV2Pro,  # noqa: E402
-                        NoPermission, NoReceiver, RazerError, find_links, pct)
+                        NoPermission, NoReceiver, RazerError, dock_set_colour, find_links, pct)
 
 POLL_SECONDS = 60
+CHARGING_POLL_SECONDS = 10  # the gauge ticks ~once a minute on charge; time the ticks closely
 WARN_AT = (20, 10, 5)
 IDLE_CHOICES = (60, 120, 300, 600, 900)
 APP_NAME = "Razer mouse"
 HISTORY = os.path.expanduser("~/.local/state/razer-tray/battery.csv")
+LEARNED_RATES = os.path.expanduser("~/.local/state/razer-tray/rates.json")
+SETTINGS = os.path.expanduser("~/.config/razer-tray/settings.json")
+RING_BRIGHTNESS = {"Low": 64, "Medium": 128, "High": 204}
+RING_EVERY = {True: 60, False: 10 * 60}  # seconds between colour updates, by charging state
+# Tuned by eye on the dock: its LEDs run green-heavy, so warm shades need far less green than on screen.
+RING_STOPS = ((0, (255, 0, 0)), (15, (255, 30, 0)), (40, (255, 90, 0)), (70, (160, 200, 0)), (100, (0, 255, 0)))
+
+
+def ring_colour(level):
+    for (lo, a), (hi, b) in zip(RING_STOPS, RING_STOPS[1:]):
+        if level <= hi:
+            f = (level - lo) / (hi - lo)
+            return tuple(round(x + (y - x) * f) for x, y in zip(a, b))
+    return RING_STOPS[-1][1]
+
+
+def load_settings():
+    try:
+        with open(SETTINGS) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(settings):
+    try:
+        os.makedirs(os.path.dirname(SETTINGS), exist_ok=True)
+        with open(SETTINGS, "w") as f:
+            json.dump(settings, f)
+    except OSError:
+        pass
 
 
 def notify(title, body, urgency="normal", replaces=None):
@@ -224,7 +257,10 @@ class Tray:
         self.last_logged = None
         self.raw = None
         self.low_notification = None
-        self.session = Session()
+        self.session = Session(LEARNED_RATES)
+        self.settings = load_settings()
+        self.ring_sent = None  # (colour, brightness, charging) last written to the dock
+        self.ring_sent_at = 0
         self.session.load(HISTORY)
 
         self.reader = Reader()
@@ -265,6 +301,23 @@ class Tray:
             lighting_menu.addAction(action)
             self.lighting_actions[on] = action
 
+        ring_menu = menu.addMenu("Dock ring")
+        self.ring_group = QActionGroup(ring_menu)
+        for mode, label in (("level", "Charge level"), ("off", "Off")):
+            action = QAction(label, ring_menu, checkable=True)
+            action.setChecked(self.settings.get("dock_ring", "level") == mode)
+            action.triggered.connect(lambda _, mode=mode: self.set_ring_mode(mode))
+            self.ring_group.addAction(action)
+            ring_menu.addAction(action)
+        ring_menu.addSeparator()
+        self.brightness_group = QActionGroup(ring_menu)
+        for name in RING_BRIGHTNESS:
+            action = QAction(f"{name} brightness", ring_menu, checkable=True)
+            action.setChecked(self.settings.get("dock_brightness", "Medium") == name)
+            action.triggered.connect(lambda _, name=name: self.set_ring_brightness(name))
+            self.brightness_group.addAction(action)
+            ring_menu.addAction(action)
+
         idle_menu = menu.addMenu("Sleep when idle for")
         self.idle_group = QActionGroup(idle_menu)
         self.idle_actions = {}
@@ -289,6 +342,7 @@ class Tray:
 
     def relink(self):
         """A receiver or cable came or went: drop the current link so the probe order picks again."""
+        self.ring_sent = None  # a replugged dock has lost its live colour
         self.reader.run(lambda mouse: mouse.close() or read_status(mouse))
         self.refresh_soon()
 
@@ -301,6 +355,35 @@ class Tray:
             return read_status(mouse)
         self.reader.run(job)
 
+    def set_ring_mode(self, mode):
+        self.settings["dock_ring"] = mode
+        save_settings(self.settings)
+        self.update_ring()
+
+    def set_ring_brightness(self, name):
+        self.settings["dock_brightness"] = name
+        save_settings(self.settings)
+        self.update_ring()
+
+    def update_ring(self):
+        if self.settings.get("dock_ring", "level") == "off":
+            wanted = ((0, 0, 0), 0, self.charging)
+        elif self.level is None:
+            return
+        else:
+            brightness = RING_BRIGHTNESS.get(self.settings.get("dock_brightness"), RING_BRIGHTNESS["Medium"])
+            wanted = (ring_colour(self.level), brightness, self.charging)
+        if wanted == self.ring_sent:
+            return
+        # A colour drift waits its turn; a mode, brightness or charging change goes out at once.
+        only_drift = self.ring_sent and self.ring_sent[1:] == wanted[1:]
+        if only_drift and time.time() - self.ring_sent_at < RING_EVERY[self.charging]:
+            return
+        brightness = None if self.ring_sent and self.ring_sent[1] == wanted[1] else wanted[1]
+        self.ring_sent, self.ring_sent_at = wanted, time.time()
+        # Through the worker, so dock writes never interleave with the mouse's reads on the same device.
+        self.reader.run(lambda mouse: (dock_set_colour(wanted[0], brightness), {"state": "dock"})[1])
+
     def set_idle(self, seconds):
         def job(mouse):
             mouse.set_idle_time(seconds)
@@ -309,12 +392,17 @@ class Tray:
 
     def on_result(self, result):
         state = result["state"]
+        if state == "dock":
+            return
         if state == "ok":
             self.raw, self.link = result["raw"], result["link"]
             self.level = pct(self.raw)
             if result["charging"] is not None:
                 self.charging = result["charging"]
-            self.session.add(time.time(), self.raw, self.charging)
+            self.session.add(time.time(), self.raw, self.link, self.charging)
+            interval = (CHARGING_POLL_SECONDS if self.charging else POLL_SECONDS) * 1000
+            if self.timer.interval() != interval:
+                self.timer.start(interval)
             if result["idle"] is not None:
                 self.idle = result["idle"]
             if result["lighting"] is not None:
@@ -322,6 +410,7 @@ class Tray:
             self.last_read = time.time()
             self.log_reading()
             self.check_notifications()
+            self.update_ring()
             for seconds, action in self.idle_actions.items():
                 action.setChecked(seconds == self.idle)
         elif state == "no-permission" and not self.told_permission:

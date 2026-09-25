@@ -11,10 +11,11 @@ It talks to the mouse over raw HID, so it needs no OpenRazer kernel driver. That
 - Estimates the time to full while charging, and the time left and drain rate per hour while in use.
 - Updates the moment the mouse is placed on or lifted off the Mouse Dock Pro, using the dock's own reports, and the moment a cable, dongle or dock is plugged in or removed.
 - Closes any low battery warning as soon as the mouse starts charging.
+- Colours the Mouse Dock Pro's ring by charge level, from red through orange and yellow to green, at a brightness you pick.
 - Switches the mouse lighting on or off and sets the idle sleep timer from the tray menu.
 - Keeps a battery history in `~/.local/state/razer-tray/battery.csv`, so you can see how fast it drains.
 
-The mouse reports its battery in 255 steps, about 0.4% each. The estimates are fitted over the last 20 minutes of charging or 3 hours of use, and ignore the first few minutes after a charger connects, when the reading jumps. Expect the time to full to run a little optimistic near the top, where the battery charges more slowly.
+The mouse's battery gauge moves in whole percents, ticking about once a minute on the cable. While charging the tray checks every 10 seconds to time those ticks, so an estimate appears after three of them, and it sharpens from there. Charge rates on the cable and the dock, and the drain rate in use, are remembered separately, so the next session shows an estimate straight away. Expect the time to full to run a little optimistic near the top, where the battery charges more slowly.
 
 It works through the Mouse Dock Pro, the HyperSpeed wireless dongle or a USB cable, whichever the mouse answers on.
 
