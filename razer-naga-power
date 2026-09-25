@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Read battery and sleep settings on a Razer Naga V2 Pro, and switch its lighting off."""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from razer_naga import LEDS, NagaV2Pro, RazerError  # noqa: E402
+
+
+def attempt(label, read):
+    try:
+        print(f"{label:<26}{read()}")
+    except RazerError as e:
+        print(f"{label:<26}{e}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--lights-off", action="store_true", help="switch every LED off and save it to the mouse")
+    parser.add_argument("--idle", type=int, metavar="SECONDS", help="sleep after this many idle seconds (60-900)")
+    opts = parser.parse_args()
+
+    mouse = NagaV2Pro()
+    try:
+        print(f"Mouse answers through the {mouse.connect()}.\n")
+        if opts.lights_off:
+            for name, ok in mouse.lights_off().items():
+                print(f"{name} off: {'ok' if ok else 'failed (probably no such LED)'}")
+            print()
+        if opts.idle is not None:
+            print(f"Idle sleep set to {mouse.set_idle_time(opts.idle)} s\n")
+    except RazerError as e:
+        sys.exit(str(e))
+
+    attempt("Battery:", lambda: f"{mouse.battery()}%")
+    attempt("Charging:", lambda: "yes" if mouse.charging() else "no")
+    attempt("Sleeps after idle:", lambda: f"{mouse.idle_time()} s")
+    attempt("Low-battery mode at:", lambda: f"{mouse.low_battery_threshold()}%")
+    attempt("Polling rate:", lambda: f"{mouse.poll_rate()} Hz")
+    for name, led in LEDS.items():
+        attempt(f"{name} brightness:", lambda led=led: f"{mouse.led_brightness(led)}%")
+    mouse.close()
+
+
+if __name__ == "__main__":
+    main()

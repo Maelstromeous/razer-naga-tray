@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+"""Tray icon for a Razer Naga V2 Pro: battery level, charging state, low-battery notifications."""
+import os
+import queue
+import select
+import subprocess
+import sys
+import threading
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from PyQt6.QtCore import QObject, QRectF, Qt, QTimer, pyqtSignal  # noqa: E402
+from PyQt6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap  # noqa: E402
+from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon  # noqa: E402
+
+from razer_naga import (DOCK_EVENTS, EVENT_INTERFACE, EVENT_REPORT_ID, MouseAsleep, NagaV2Pro,  # noqa: E402
+                        NoPermission, NoReceiver, RazerError, find_links)
+
+POLL_SECONDS = 60
+WARN_AT = (20, 10, 5)
+IDLE_CHOICES = (60, 120, 300, 600, 900)
+APP_NAME = "Razer mouse"
+HISTORY = os.path.expanduser("~/.local/state/razer-tray/battery.csv")
+
+
+def notify(title, body, urgency="normal"):
+    subprocess.Popen(["notify-send", "-a", APP_NAME, "-i", "input-mouse", "-u", urgency, title, body])
+
+
+def level_colour(level):
+    if level is None:
+        return QColor("#8a8a8a")
+    if level <= 10:
+        return QColor("#e5484d")
+    if level <= 20:
+        return QColor("#f5a524")
+    return QColor("#46a758")
+
+
+def render_icon(level, charging, stale):
+    size = 64
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    # A bolt overlay is illegible at tray size, so charging gets its own colour.
+    colour = QColor("#8a8a8a") if stale else QColor("#0090ff") if charging else level_colour(level)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(colour)
+    p.drawRoundedRect(QRectF(2, 2, size - 4, size - 4), 14, 14)
+
+    text = "?" if level is None else str(level)
+    font = QFont("Sans", 34 if len(text) < 3 else 25, QFont.Weight.Black)
+    path = QPainterPath()
+    path.addText(0, 0, font, text)
+    box = path.boundingRect()
+    path.translate((size - box.width()) / 2 - box.left(), (size - box.height()) / 2 - box.top())
+    p.setPen(QPen(QColor(0, 0, 0, 90), 3))
+    p.setBrush(QColor("white"))
+    p.drawPath(path)
+
+    p.end()
+    return QIcon(pix)
+
+
+class Reader(QObject):
+    """Runs mouse jobs in order on one worker thread; a sleeping mouse takes most of a second to time out."""
+
+    finished = pyqtSignal(dict)
+
+    def __init__(self):
+        super().__init__()
+        self.mouse = NagaV2Pro()
+        self.jobs = queue.Queue()
+        self.poll_queued = threading.Event()
+        threading.Thread(target=self._work, daemon=True).start()
+
+    def poll(self):
+        # A sleeping mouse must not pile up a backlog of polls.
+        if not self.poll_queued.is_set():
+            self.poll_queued.set()
+            self.jobs.put(None)
+
+    def run(self, job):
+        self.jobs.put(job)
+
+    def _work(self):
+        while True:
+            job = self.jobs.get()
+            if job is None:
+                self.poll_queued.clear()
+                job = read_status
+            self.finished.emit(self._attempt(job))
+
+    def _attempt(self, job):
+        try:
+            return job(self.mouse)
+        except MouseAsleep:
+            self.mouse.close()
+            return {"state": "asleep"}
+        except NoPermission as e:
+            return {"state": "no-permission", "error": str(e)}
+        except NoReceiver as e:
+            return {"state": "no-receiver", "error": str(e)}
+        except RazerError as e:
+            self.mouse.close()
+            return {"state": "error", "error": str(e)}
+
+
+class DockWatcher(QObject):
+    """Listens for the receiver's own dock/undock reports, so the tray reacts without waiting for a poll."""
+
+    changed = pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+        threading.Thread(target=self._watch, daemon=True).start()
+
+    def _watch(self):
+        fds = {}
+        while True:
+            if not fds:
+                for path, _ in find_links(EVENT_INTERFACE):
+                    try:
+                        fds[os.open(path, os.O_RDONLY | os.O_NONBLOCK)] = path
+                    except OSError:
+                        pass
+                if not fds:
+                    time.sleep(10)  # receiver unplugged or no permission yet
+                    continue
+            ready, _, _ = select.select(list(fds), [], [], 30)
+            if not ready and {p for p, _ in find_links(EVENT_INTERFACE)} != set(fds.values()):
+                for stale in fds:
+                    os.close(stale)
+                fds = {}
+                continue
+            for fd in ready:
+                try:
+                    report = os.read(fd, 64)
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    # Unplugged: drop every node and rescan, since hidraw numbers get reused.
+                    for stale in fds:
+                        os.close(stale)
+                    fds = {}
+                    break
+                if len(report) > 1 and report[0] == EVENT_REPORT_ID and report[1] in DOCK_EVENTS:
+                    self.changed.emit()
+
+
+def optional(read):
+    try:
+        return read()
+    except RazerError:
+        return None
+
+
+def read_status(mouse):
+    if mouse.fd is None:
+        mouse.connect()
+    battery = mouse.battery()
+    # Only the battery is essential; a failed extra read must not throw it away.
+    return {"state": "ok", "battery": battery, "charging": optional(mouse.charging),
+            "idle": optional(mouse.idle_time), "link": mouse.link}
+
+
+class Tray:
+    def __init__(self, app):
+        self.app = app
+        self.level = None
+        self.charging = False
+        self.link = None
+        self.idle = None
+        self.last_read = None
+        self.warned = set()
+        self.told_full = False
+        self.told_permission = False
+        self.last_logged = None
+
+        self.reader = Reader()
+        self.reader.finished.connect(self.on_result)
+
+        self.icon = QSystemTrayIcon(render_icon(None, False, True))
+        self.icon.setToolTip(f"{APP_NAME}: reading…")
+        self.icon.setContextMenu(self.build_menu())
+        self.icon.activated.connect(lambda reason: self.refresh() if reason == QSystemTrayIcon.ActivationReason.Trigger else None)
+        self.icon.show()
+
+        # The charging state follows the dock report by ~2.5 s, so read now and again after it.
+        self.watcher = DockWatcher()
+        self.watcher.changed.connect(lambda: [QTimer.singleShot(ms, self.refresh) for ms in (300, 3500)])
+
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.refresh)
+        self.timer.start(POLL_SECONDS * 1000)
+        self.refresh()
+
+    def build_menu(self):
+        menu = QMenu()
+        self.status_action = menu.addAction("Reading…")
+        self.status_action.setEnabled(False)
+        menu.addSeparator()
+        menu.addAction("Refresh now", self.refresh)
+        menu.addAction("Turn lighting off", self.lights_off)
+
+        idle_menu = menu.addMenu("Sleep when idle for")
+        self.idle_group = QActionGroup(idle_menu)
+        self.idle_actions = {}
+        for seconds in IDLE_CHOICES:
+            action = QAction(f"{seconds // 60} min", idle_menu, checkable=True)
+            action.triggered.connect(lambda _, s=seconds: self.set_idle(s))
+            self.idle_group.addAction(action)
+            idle_menu.addAction(action)
+            self.idle_actions[seconds] = action
+
+        menu.addSeparator()
+        menu.addAction("Quit", self.app.quit)
+        self.menu = menu
+        return menu
+
+    def refresh(self):
+        self.reader.poll()
+
+    def lights_off(self):
+        def job(mouse):
+            result = read_status(mouse)
+            done = [name for name, ok in mouse.lights_off().items() if ok]
+            notify("Lighting off", f"Switched off: {', '.join(done) or 'nothing answered'}")
+            return result
+        self.reader.run(job)
+
+    def set_idle(self, seconds):
+        def job(mouse):
+            mouse.set_idle_time(seconds)
+            return read_status(mouse)
+        self.reader.run(job)
+
+    def on_result(self, result):
+        state = result["state"]
+        if state == "ok":
+            self.level, self.link = result["battery"], result["link"]
+            if result["charging"] is not None:
+                self.charging = result["charging"]
+            if result["idle"] is not None:
+                self.idle = result["idle"]
+            self.last_read = time.time()
+            self.log_reading()
+            self.check_notifications()
+            for seconds, action in self.idle_actions.items():
+                action.setChecked(seconds == self.idle)
+        elif state == "no-permission" and not self.told_permission:
+            self.told_permission = True
+            notify("Can't read the mouse", result["error"], "critical")
+
+        stale = state != "ok"
+        self.icon.setIcon(render_icon(self.level, self.charging and not stale, stale))
+        summary = self.describe(state, result.get("error"))
+        self.icon.setToolTip(summary)
+        self.status_action.setText(summary.splitlines()[0])
+
+    def log_reading(self):
+        """Append to the history whenever the level or charging changes, to measure the drain rate."""
+        reading = (self.level, self.charging)
+        if reading == self.last_logged:
+            return
+        self.last_logged = reading
+        try:
+            os.makedirs(os.path.dirname(HISTORY), exist_ok=True)
+            with open(HISTORY, "a") as f:
+                f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')},{self.level},{int(self.charging)},{self.link}\n")
+        except OSError:
+            pass
+
+    def describe(self, state, error):
+        if self.level is None:
+            known = "Battery unknown"
+        else:
+            known = f"Battery {self.level}%" + (", charging" if self.charging else "")
+        if state == "ok":
+            return f"{known}\nVia the {self.link}"
+        age = f" (as of {time.strftime('%H:%M', time.localtime(self.last_read))})" if self.last_read else ""
+        reason = {"asleep": "Mouse asleep or out of range", "no-receiver": "No dock or dongle found"}.get(state, error)
+        return f"{known}{age}\n{reason}"
+
+    def check_notifications(self):
+        if self.charging:
+            self.warned.clear()
+            if self.level >= 100 and not self.told_full:
+                self.told_full = True
+                notify("Mouse fully charged", "You can take it off the dock.")
+            return
+        self.told_full = False
+        crossed = {t for t in WARN_AT if self.level <= t}
+        if crossed - self.warned:
+            self.warned |= crossed
+            notify(f"Mouse battery at {self.level}%", "Put it on the dock to charge.",
+                   "critical" if min(crossed) <= 10 else "normal")
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    app.setDesktopFileName("razer-tray")
+    app.setQuitOnLastWindowClosed(False)
+    if not QSystemTrayIcon.isSystemTrayAvailable():
+        sys.exit("No system tray available.")
+    tray = Tray(app)  # noqa: F841 (kept alive for the app's lifetime)
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

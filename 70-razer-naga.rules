@@ -1,0 +1,2 @@
+# Let the logged-in user read battery and set lighting on the Naga V2 Pro, its dongle and the Mouse Dock Pro.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00a4|00a7|00a8", TAG+="uaccess"
