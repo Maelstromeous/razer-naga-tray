@@ -9,10 +9,11 @@ It talks to the mouse over raw HID, so it needs no OpenRazer kernel driver. That
 - Shows the battery level in the tray as a small battery that fills as it charges: green while charging, blue once full, your panel's text colour on battery, red at 20% or below.
 - Sends a notification at 20%, 10% and 5%, and when the mouse is fully charged, when the Mouse Dock Pro ring also blinks blue.
 - Estimates the time to full while charging, and the time left and drain rate per hour while in use.
-- Updates the moment the mouse is placed on or lifted off the Mouse Dock Pro, using the dock's own reports, and the moment a cable, dongle or dock is plugged in or removed.
+- Updates the moment the mouse is placed on or lifted off the Mouse Dock Pro, falls asleep or wakes, using the dock's own reports, and the moment a cable, dongle or dock is plugged in or removed. With nothing plugged in at all it shows a question mark.
 - Closes any low battery warning as soon as the mouse starts charging.
 - Colours the Mouse Dock Pro's ring by charge level, from red through orange and yellow to green, at a brightness you pick. It turns blue once the mouse reaches 95% on any charger. Or pick any colour of your own, previewed live on the ring as you choose it.
-- Switches the mouse lighting on or off and sets the idle sleep timer from the tray menu.
+- Mouse lighting from the tray menu, with the same choices as the ring plus the mouse's own colour cycle, and brightness settings that show only while the light is on. The tray puts it back after the mouse wakes, since the mouse falls back to its own effect when it sleeps.
+- Sets the mouse's idle sleep timer from the tray menu.
 - Keeps a battery history in `~/.local/state/razer-naga-tray/battery.csv`, so you can see how fast it drains.
 
 The mouse's battery gauge moves in whole percents, ticking about once a minute on the cable. While charging the tray checks every 10 seconds to time those ticks. Batteries charge and drain on a curve rather than a straight line, so the tray learns how long each percent takes at each level, separately for the cable, the dock and normal use, from its own history. Estimates follow that curve, adjusted to how the current session compares. The first charge relies on the live rate and runs optimistic near the top; each full charge after that sharpens it.
@@ -51,6 +52,10 @@ razer-naga-power --lights-off    # switch the lighting off and save it to the mo
 razer-naga-power --lights-on     # colour cycling at 33% brightness
 razer-naga-power --idle 120      # sleep after 2 minutes idle (60 to 900 seconds)
 ```
+
+## Troubleshooting
+
+Start it with `RAZER_NAGA_TRAY_DEBUG=1 razer-naga-tray` to log every report from the dock and every reading, with timestamps, to the terminal. Include that log with any bug report.
 
 ## Credits
 

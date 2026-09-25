@@ -16,8 +16,8 @@ from PyQt6.QtWidgets import QApplication, QColorDialog, QMenu, QSystemTrayIcon  
 
 from battery_stats import Session  # noqa: E402
 from razer_naga import (DOCK_EVENTS, EVENT_INTERFACE, EVENT_REPORT_ID, MouseAsleep, NagaV2Pro,  # noqa: E402
-                        NoPermission, NoReceiver, RazerError, dock_set_colour, dock_set_frame,
-                        find_links, pct)
+                        EFFECT_NONE, EFFECT_SPECTRUM, EFFECT_STATIC, NoPermission, NoReceiver,
+                        RazerError, dock_set_colour, dock_set_frame, find_links, pct)
 
 POLL_SECONDS = 60
 CHARGING_POLL_SECONDS = 10  # the gauge ticks ~once a minute on charge; time the ticks closely
@@ -28,8 +28,14 @@ SHORT_LINK = {"USB cable": "USB", "Mouse Dock Pro": "dock", "wireless dongle": "
 HISTORY = os.path.expanduser("~/.local/state/razer-naga-tray/battery.csv")
 SETTINGS = os.path.expanduser("~/.config/razer-naga-tray/settings.json")
 RING_BRIGHTNESS = {"Low": 64, "Medium": 128, "High": 204}
-RING_EVERY = {True: 60, False: 10 * 60}
-RING_CHARGED_AT, RING_CHARGED = 95, (0, 0, 255)  # on a charger and near full: blue, whatever the source  # seconds between colour updates, by charging state
+RING_EVERY = {True: 60, False: 10 * 60}  # seconds between charge-level colour updates, by charging state
+RING_CHARGED_AT, RING_CHARGED = 95, (0, 0, 255)  # on a charger and near full: blue, whatever the source
+LIGHTS = {
+    "dock": ("Dock ring", (("level", "Charge level"), ("custom", "Custom colour…"), ("off", "Off"))),
+    "mouse": ("Mouse lighting", (("cycle", "Colour cycle"), ("level", "Charge level"),
+                                 ("custom", "Custom colour…"), ("off", "Off"))),
+}
+DEFAULT_COLOUR = (0, 160, 255)
 # Tuned by eye on the dock: its LEDs run green-heavy, so warm shades need far less green than on screen.
 RING_STOPS = ((0, (255, 0, 0)), (15, (255, 30, 0)), (40, (255, 90, 0)), (70, (160, 200, 0)), (100, (0, 255, 0)))
 
@@ -56,9 +62,12 @@ def ring_colour(level):
 def load_settings():
     try:
         with open(SETTINGS) as f:
-            return json.load(f)
+            settings = json.load(f)
     except (OSError, ValueError):
         return {}
+    if "dock_ring" in settings:  # renamed in 0.1.4
+        settings.setdefault("dock_mode", settings.pop("dock_ring"))
+    return settings
 
 
 def save_settings(settings):
@@ -68,6 +77,14 @@ def save_settings(settings):
             json.dump(settings, f)
     except OSError:
         pass
+
+
+DEBUG = bool(os.environ.get("RAZER_NAGA_TRAY_DEBUG"))
+
+
+def debug(message):
+    if DEBUG:
+        print(f"{time.strftime('%H:%M:%S')}.{int(time.time() * 1000) % 1000:03d} {message}", file=sys.stderr, flush=True)
 
 
 def notify(title, body, urgency="normal", replaces=None):
@@ -279,6 +296,7 @@ class DockWatcher(QObject):
                         os.close(stale)
                     fds = {}
                     break
+                debug(f"report {report.hex()}")
                 if len(report) > 1 and report[0] == EVENT_REPORT_ID and report[1] in DOCK_EVENTS:
                     self.changed.emit()
 
@@ -315,9 +333,11 @@ class Tray:
         self.low_notification = None
         self.session = Session()
         self.settings = load_settings()
-        self.ring_sent = None  # (colour, brightness, charging) last written to the dock
-        self.ring_sent_at = 0
-        self.previewing = False
+        self.sent = {"dock": None, "mouse": None}  # what each light was last told to show
+        self.sent_at = {"dock": 0, "mouse": 0}
+        self.settings.setdefault("dock_mode", "level")
+        self.previewing = None  # the light a colour dialog is previewing on
+        self.last_state = None
         self.blinking = False
         self.session.load(HISTORY)
 
@@ -349,39 +369,7 @@ class Tray:
         self.eta_action.setVisible(False)
         menu.addSeparator()
         menu.addAction("Refresh now", self.refresh)
-        lighting_menu = menu.addMenu("Lighting")
-        self.lighting_group = QActionGroup(lighting_menu)
-        self.lighting_actions = {}
-        for on, label in ((True, "On"), (False, "Off")):
-            action = QAction(label, lighting_menu, checkable=True)
-            action.triggered.connect(lambda _, on=on: self.set_lighting(on))
-            self.lighting_group.addAction(action)
-            lighting_menu.addAction(action)
-            self.lighting_actions[on] = action
-
-        ring_menu = menu.addMenu("Dock ring")
-        self.ring_group = QActionGroup(ring_menu)
-        self.ring_actions = {}
-        for mode, label in (("level", "Charge level"), ("custom", "Custom colour…"), ("off", "Off")):
-            action = QAction(label, ring_menu, checkable=True)
-            action.setChecked(self.settings.get("dock_ring", "level") == mode)
-            if mode == "custom":
-                action.triggered.connect(self.pick_colour)
-                if "dock_colour" in self.settings:
-                    action.setIcon(swatch(self.settings["dock_colour"]))
-            else:
-                action.triggered.connect(lambda _, mode=mode: self.set_ring_mode(mode))
-            self.ring_group.addAction(action)
-            ring_menu.addAction(action)
-            self.ring_actions[mode] = action
-        ring_menu.addSeparator()
-        self.brightness_group = QActionGroup(ring_menu)
-        for name in RING_BRIGHTNESS:
-            action = QAction(f"{name} brightness", ring_menu, checkable=True)
-            action.setChecked(self.settings.get("dock_brightness", "Medium") == name)
-            action.triggered.connect(lambda _, name=name: self.set_ring_brightness(name))
-            self.brightness_group.addAction(action)
-            ring_menu.addAction(action)
+        self.light_menus = {target: self.build_light_menu(menu, target) for target in LIGHTS}
 
         idle_menu = menu.addMenu("Sleep when idle for")
         self.idle_group = QActionGroup(idle_menu)
@@ -407,86 +395,137 @@ class Tray:
 
     def relink(self):
         """A receiver or cable came or went: drop the current link so the probe order picks again."""
-        self.ring_sent = None  # a replugged dock has lost its live colour
+        self.sent["dock"] = None  # a replugged dock has lost its live colour
         self.reader.run(lambda mouse: mouse.close() or read_status(mouse))
         self.refresh_soon()
 
-    def set_lighting(self, on):
-        def job(mouse):
-            if mouse.fd is None:
-                mouse.connect()
-            if not any(mouse.set_lighting(on).values()):
-                notify("Lighting unchanged", "The mouse did not accept the change.")
-            return read_status(mouse)
-        self.reader.run(job)
+    def build_light_menu(self, menu, target):
+        title, modes = LIGHTS[target]
+        sub = menu.addMenu(title)
+        mode_group, brightness_group = QActionGroup(sub), QActionGroup(sub)
+        actions = {"modes": {}, "brightness": []}
+        for mode, label in modes:
+            action = QAction(label, sub, checkable=True)
+            if mode == "custom":
+                action.triggered.connect(lambda _: self.pick_colour(target))
+                if f"{target}_colour" in self.settings:
+                    action.setIcon(swatch(self.settings[f"{target}_colour"]))
+            else:
+                action.triggered.connect(lambda _, mode=mode: self.set_light_mode(target, mode))
+            mode_group.addAction(action)
+            sub.addAction(action)
+            actions["modes"][mode] = action
+        actions["separator"] = sub.addSeparator()
+        for name in RING_BRIGHTNESS:
+            action = QAction(f"{name} brightness", sub, checkable=True)
+            action.setChecked(self.settings.get(f"{target}_brightness", "Medium") == name)
+            action.triggered.connect(lambda _, name=name: self.set_light_brightness(target, name))
+            brightness_group.addAction(action)
+            sub.addAction(action)
+            actions["brightness"].append(action)
+        self.light_menus = getattr(self, "light_menus", {})
+        self.light_menus[target] = actions
+        self.show_light_mode(target)
+        return actions
 
-    def set_ring_mode(self, mode):
-        self.settings["dock_ring"] = mode
+    def show_light_mode(self, target):
+        """Tick the current mode, and show brightness only while the light is on."""
+        actions, mode = self.light_menus[target], self.settings.get(f"{target}_mode")
+        for m, action in actions["modes"].items():
+            action.setChecked(m == mode)
+        lit = mode not in (None, "off")
+        actions["separator"].setVisible(lit)
+        for action in actions["brightness"]:
+            action.setVisible(lit)
+
+    def set_light_mode(self, target, mode):
+        self.settings[f"{target}_mode"] = mode
         save_settings(self.settings)
-        self.update_ring()
+        self.show_light_mode(target)
+        self.update_light(target)
 
-    def pick_colour(self):
-        """Colour dialog that previews on the ring as you drag; Cancel puts the old mode back."""
-        start = QColor(*self.settings.get("dock_colour", (0, 160, 255)))
-        dialog = QColorDialog(start)
-        dialog.setWindowTitle("Dock ring colour")
-        self.previewing = True
+    def set_light_brightness(self, target, name):
+        self.settings[f"{target}_brightness"] = name
+        save_settings(self.settings)
+        self.update_light(target)
+
+    def brightness(self, target):
+        return RING_BRIGHTNESS.get(self.settings.get(f"{target}_brightness"), RING_BRIGHTNESS["Medium"])
+
+    def pick_colour(self, target):
+        """Colour dialog that previews on the light as you drag; Cancel puts the old mode back."""
+        dialog = QColorDialog(QColor(*self.settings.get(f"{target}_colour", DEFAULT_COLOUR)))
+        dialog.setWindowTitle(f"{LIGHTS[target][0]} colour")
+        self.previewing = target
         self.preview_rgb = None
-        preview_timer = QTimer(singleShot=True, interval=80)
+        preview_timer = QTimer(singleShot=True, interval=80 if target == "dock" else 300)
 
         def send_preview():
-            rgb = led_colour(self.preview_rgb)
-            brightness = RING_BRIGHTNESS.get(self.settings.get("dock_brightness"), RING_BRIGHTNESS["Medium"])
-            self.reader.run(lambda mouse: (dock_set_colour(rgb, brightness), {"state": "dock"})[1])
+            wanted = (EFFECT_STATIC, led_colour(self.preview_rgb), self.brightness(target))
+            self.reader.run(lambda mouse: self.write_light(target, mouse, wanted))
 
         def changed(colour):
             self.preview_rgb = colour.getRgb()[:3]
             if not preview_timer.isActive():
-                preview_timer.start()  # at most one write per 80 ms while dragging
+                preview_timer.start()  # the mouse is written over the air, so it previews less often
 
         preview_timer.timeout.connect(send_preview)
         dialog.currentColorChanged.connect(changed)
         accepted = dialog.exec() == QColorDialog.DialogCode.Accepted
         preview_timer.stop()
-        self.previewing = False
-        self.ring_sent = None  # whatever the preview left on the ring gets rewritten
+        self.previewing = None
+        self.sent[target] = None  # whatever the preview left on the light gets rewritten
         if accepted:
-            self.settings["dock_colour"] = list(dialog.currentColor().getRgb()[:3])
-            self.ring_actions["custom"].setIcon(swatch(self.settings["dock_colour"]))
-            self.set_ring_mode("custom")
+            self.settings[f"{target}_colour"] = list(dialog.currentColor().getRgb()[:3])
+            self.light_menus[target]["modes"]["custom"].setIcon(swatch(self.settings[f"{target}_colour"]))
+            self.set_light_mode(target, "custom")
         else:
-            self.ring_actions[self.settings.get("dock_ring", "level")].setChecked(True)
-            self.update_ring()
+            self.show_light_mode(target)
+            self.update_light(target)
 
-    def set_ring_brightness(self, name):
-        self.settings["dock_brightness"] = name
-        save_settings(self.settings)
-        self.update_ring()
-
-    def update_ring(self):
-        if self.previewing or self.blinking:
+    def update_light(self, target):
+        if self.previewing == target or (target == "dock" and self.blinking):
             return
-        mode = self.settings.get("dock_ring", "level")
-        brightness = RING_BRIGHTNESS.get(self.settings.get("dock_brightness"), RING_BRIGHTNESS["Medium"])
+        mode = self.settings.get(f"{target}_mode")
+        brightness = self.brightness(target)
+        if mode is None:
+            return  # the mouse's mode is learned from its first reading
         if mode == "off":
-            wanted = ((0, 0, 0), 0, self.charging, mode)
+            wanted = (EFFECT_NONE, (0, 0, 0), 0)
+        elif mode == "cycle":
+            wanted = (EFFECT_SPECTRUM, None, brightness)
         elif mode == "custom":
-            wanted = (led_colour(self.settings.get("dock_colour", (0, 160, 255))), brightness, self.charging, mode)
+            wanted = (EFFECT_STATIC, led_colour(self.settings.get(f"{target}_colour", DEFAULT_COLOUR)), brightness)
         elif self.level is None:
             return
         else:
             charged = self.charging and self.level >= RING_CHARGED_AT
-            wanted = (RING_CHARGED if charged else ring_colour(self.level), brightness, self.charging, mode)
-        if wanted == self.ring_sent:
+            wanted = (EFFECT_STATIC, RING_CHARGED if charged else ring_colour(self.level), brightness)
+        wanted += (self.charging, mode)
+        sent = self.sent[target]
+        if wanted == sent:
             return
-        # A colour drift waits its turn; a mode, brightness or charging change goes out at once.
-        only_drift = self.ring_sent and self.ring_sent[1:] == wanted[1:] and mode == "level"
-        if only_drift and time.time() - self.ring_sent_at < RING_EVERY[self.charging]:
+        # A charge-level colour drift waits its turn; any other change goes out at once.
+        only_drift = sent and sent[0] == wanted[0] and sent[2:] == wanted[2:] and mode == "level"
+        if only_drift and time.time() - self.sent_at[target] < RING_EVERY[self.charging]:
             return
-        brightness = None if self.ring_sent and self.ring_sent[1] == wanted[1] else wanted[1]
-        self.ring_sent, self.ring_sent_at = wanted, time.time()
-        # Through the worker, so dock writes never interleave with the mouse's reads on the same device.
-        self.reader.run(lambda mouse: (dock_set_colour(wanted[0], brightness), {"state": "dock"})[1])
+        self.sent[target], self.sent_at[target] = wanted, time.time()
+        # Through the worker, so light writes never interleave with the mouse's reads.
+        self.reader.run(lambda mouse: self.write_light(target, mouse, wanted))
+
+    @staticmethod
+    def write_light(target, mouse, wanted):
+        effect, rgb, brightness = wanted[:3]
+        if target == "dock":
+            dock_set_colour(rgb, brightness)
+            return {"state": "light", "target": target, "ok": True}
+        try:
+            if mouse.fd is None:
+                mouse.connect()
+            ok = any(mouse.set_led(effect, rgb, brightness).values())
+        except (MouseAsleep, NoReceiver):
+            ok = False  # asleep or unplugged: resent after the next good reading
+        return {"state": "light", "target": target, "ok": ok}
 
     def set_idle(self, seconds):
         def job(mouse):
@@ -496,8 +535,18 @@ class Tray:
 
     def on_result(self, result):
         state = result["state"]
+        debug(f"result {state} {result.get('raw', '')} {result.get('error', '')}")
         if state == "dock":
             return
+        if state == "light":
+            if not result["ok"]:
+                self.sent[result["target"]] = None
+            return
+        if state == "ok" and self.last_state != "ok":
+            # The mouse falls back to its own effect after sleep, so a reconnect gets its lighting again.
+            self.sent["mouse"] = None
+        if state not in ("light", "dock"):
+            self.last_state = state
         if state == "ok":
             previous = self.level
             self.raw, self.link = result["raw"], result["link"]
@@ -510,12 +559,16 @@ class Tray:
                 self.timer.start(interval)
             if result["idle"] is not None:
                 self.idle = result["idle"]
-            if result["lighting"] is not None:
-                self.lighting_actions[result["lighting"]].setChecked(True)
+            if "mouse_mode" not in self.settings and result["lighting"] is not None:
+                # First run: adopt whatever the mouse is already doing rather than change it.
+                self.settings["mouse_mode"] = "cycle" if result["lighting"] else "off"
+                save_settings(self.settings)
+                self.show_light_mode("mouse")
             self.last_read = time.time()
             self.log_reading()
             self.check_notifications(previous)
-            self.update_ring()
+            for target in LIGHTS:
+                self.update_light(target)
             for seconds, action in self.idle_actions.items():
                 action.setChecked(seconds == self.idle)
         elif state == "no-permission" and not self.told_permission:
@@ -526,7 +579,9 @@ class Tray:
         self.eta = None if stale else self.session.summary(self.level)
         self.eta_action.setText(self.eta or "")
         self.eta_action.setVisible(bool(self.eta))
-        self.icon.setIcon(render_icon(self.level, self.charging and not stale, stale))
+        # Asleep keeps the last reading, greyed; with no receiver at all there is nothing to show.
+        shown = None if state == "no-receiver" else self.level
+        self.icon.setIcon(render_icon(shown, self.charging and not stale, stale))
         summary = self.describe(state, result.get("error"))
         self.icon.setToolTip(summary)
         self.status_action.setText(summary.splitlines()[0])
@@ -553,13 +608,15 @@ class Tray:
             via = SHORT_LINK.get(self.link, self.link)
             line = f"Battery {self.level}%, " + (f"charging via {via}" if self.charging else f"connected to {via}")
             return line + (f"\n{self.eta}" if self.eta else "")
+        if state == "no-receiver":
+            return "Mouse not connected\nNo dock, dongle or cable found"
         age = f" (as of {time.strftime('%H:%M', time.localtime(self.last_read))})" if self.last_read else ""
         reason = {"asleep": "Mouse asleep or out of range", "no-receiver": "No dock or dongle found"}.get(state, error)
         return f"{known}{age}\n{reason}"
 
     def blink_charged(self, seconds=10, interval_ms=500):
-        """Flash the ring blue, then hand it back to update_ring, which leaves it solid blue."""
-        if self.settings.get("dock_ring", "level") != "level":
+        """Flash the ring blue, then hand it back to update_light, which leaves it solid blue."""
+        if self.settings.get("dock_mode") != "level":
             return
         self.blinking = True
         steps = seconds * 1000 // interval_ms
@@ -568,8 +625,8 @@ class Tray:
         def step(i):
             if i >= steps:
                 self.blinking = False
-                self.ring_sent = None
-                self.update_ring()
+                self.sent["dock"] = None
+                self.update_light("dock")
                 return
             # Frames, not the static effect or brightness: neither of those visibly blinks on this dock.
             rgb = RING_CHARGED if i % 2 == 0 else (0, 0, 0)

@@ -15,16 +15,17 @@ TRANSACTION_ID = 0x1F
 NOSTORE, VARSTORE = 0x00, 0x01  # live state, and the copy saved on the mouse
 # The ids this mouse answers to through the dock; OpenRazer's scroll/side ids (0x01, 0x10, 0x11) fail.
 LEDS = {"logo": 0x04, "backlight": 0x05}
-EFFECT_NONE, EFFECT_SPECTRUM = 0x00, 0x03
+EFFECT_NONE, EFFECT_STATIC, EFFECT_SPECTRUM = 0x00, 0x01, 0x03
 ON_BRIGHTNESS = 84  # 33%, what the mouse shipped with here
 POLL_RATES = {0x01: 1000, 0x02: 500, 0x08: 125}
 STATUS = {0x01: "busy", 0x02: "ok", 0x03: "failed", 0x04: "timed out", 0x05: "not supported"}
 REPORT_LEN = 90
 # Unprompted input reports on the receiver's interface 1, seen on the dock:
-# 05 0c <1|0> the instant the mouse lands on or leaves it, 05 3b ~2.5 s later (charging link).
+# 05 0c <1|0> the instant the mouse lands on or leaves it, 05 3b ~2.5 s later (charging link),
+# 05 09 <02|03> as the mouse falls asleep or wakes.
 EVENT_INTERFACE = ":1.1"
 EVENT_REPORT_ID = 0x05
-DOCK_EVENTS = (0x0C, 0x3B)
+DOCK_EVENTS = (0x09, 0x0C, 0x3B)
 
 
 def _iowr(nr, size):
@@ -136,7 +137,8 @@ class NagaV2Pro:
         except OSError as e:
             self.close()
             raise NoReceiver(f"Receiver went away: {e}")
-        if status == 0x04:
+        # Still busy after the full wait is a link going down as the mouse falls asleep.
+        if status in (0x01, 0x04):
             raise MouseAsleep("The mouse did not answer.")
         if status != 0x02:
             raise RazerError(STATUS.get(status, hex(status)))
@@ -174,22 +176,28 @@ class NagaV2Pro:
     def lighting_on(self):
         return any(self.led_brightness(led) for led in LEDS.values())
 
-    def set_lighting(self, on):
-        """Returns {led name: True if the mouse accepted it}."""
-        effect, brightness = (EFFECT_SPECTRUM, ON_BRIGHTNESS) if on else (EFFECT_NONE, 0)
+    def set_led(self, effect, rgb=None, brightness=0):
+        """One effect on every LED, live and saved. Returns {led name: True if the mouse accepted it}."""
+        if effect == EFFECT_STATIC:
+            size, extra = 0x09, (0x00, 0x00, 0x01, *rgb)
+        else:
+            size, extra = 0x06, ()
         result = {}
         for name, led in LEDS.items():
             try:
                 # Saving alone leaves the LED as it was until the next power cycle, so set both.
                 for store in (NOSTORE, VARSTORE):
-                    self.request(0x0F, 0x02, 0x06, (store, led, effect))
+                    self.request(0x0F, 0x02, size, (store, led, effect, *extra))
                     self.request(0x0F, 0x04, 0x03, (store, led, brightness))
                 result[name] = True
-            except MouseAsleep:
+            except (MouseAsleep, NoReceiver):
                 raise
             except RazerError:
                 result[name] = False
         return result
+
+    def set_lighting(self, on):
+        return self.set_led(EFFECT_SPECTRUM, brightness=ON_BRIGHTNESS) if on else self.set_led(EFFECT_NONE)
 
 
 DOCK_TRANSACTION_ID = 0xFF  # 0x1F on the dock is relayed to the mouse; 0xFF is the dock itself
