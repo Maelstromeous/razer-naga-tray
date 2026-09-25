@@ -17,16 +17,18 @@ def attempt(label, read):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--lights-off", action="store_true", help="switch every LED off and save it to the mouse")
+    lighting = parser.add_mutually_exclusive_group()
+    lighting.add_argument("--lights-off", action="store_true", help="switch the lighting off and save it to the mouse")
+    lighting.add_argument("--lights-on", action="store_true", help="colour cycling at 33%%, saved to the mouse")
     parser.add_argument("--idle", type=int, metavar="SECONDS", help="sleep after this many idle seconds (60-900)")
     opts = parser.parse_args()
 
     mouse = NagaV2Pro()
     try:
         print(f"Mouse answers through the {mouse.connect()}.\n")
-        if opts.lights_off:
-            for name, ok in mouse.lights_off().items():
-                print(f"{name} off: {'ok' if ok else 'failed (probably no such LED)'}")
+        if opts.lights_off or opts.lights_on:
+            for name, ok in mouse.set_lighting(opts.lights_on).items():
+                print(f"{name} {'on' if opts.lights_on else 'off'}: {'ok' if ok else 'failed'}")
             print()
         if opts.idle is not None:
             print(f"Idle sleep set to {mouse.set_idle_time(opts.idle)} s\n")

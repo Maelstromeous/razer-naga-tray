@@ -163,7 +163,7 @@ def read_status(mouse):
     battery = mouse.battery()
     # Only the battery is essential; a failed extra read must not throw it away.
     return {"state": "ok", "battery": battery, "charging": optional(mouse.charging),
-            "idle": optional(mouse.idle_time), "link": mouse.link}
+            "idle": optional(mouse.idle_time), "lighting": optional(mouse.lighting_on), "link": mouse.link}
 
 
 class Tray:
@@ -203,7 +203,15 @@ class Tray:
         self.status_action.setEnabled(False)
         menu.addSeparator()
         menu.addAction("Refresh now", self.refresh)
-        menu.addAction("Turn lighting off", self.lights_off)
+        lighting_menu = menu.addMenu("Lighting")
+        self.lighting_group = QActionGroup(lighting_menu)
+        self.lighting_actions = {}
+        for on, label in ((True, "On"), (False, "Off")):
+            action = QAction(label, lighting_menu, checkable=True)
+            action.triggered.connect(lambda _, on=on: self.set_lighting(on))
+            self.lighting_group.addAction(action)
+            lighting_menu.addAction(action)
+            self.lighting_actions[on] = action
 
         idle_menu = menu.addMenu("Sleep when idle for")
         self.idle_group = QActionGroup(idle_menu)
@@ -223,12 +231,13 @@ class Tray:
     def refresh(self):
         self.reader.poll()
 
-    def lights_off(self):
+    def set_lighting(self, on):
         def job(mouse):
-            result = read_status(mouse)
-            done = [name for name, ok in mouse.lights_off().items() if ok]
-            notify("Lighting off", f"Switched off: {', '.join(done) or 'nothing answered'}")
-            return result
+            if mouse.fd is None:
+                mouse.connect()
+            if not any(mouse.set_lighting(on).values()):
+                notify("Lighting unchanged", "The mouse did not accept the change.")
+            return read_status(mouse)
         self.reader.run(job)
 
     def set_idle(self, seconds):
@@ -245,6 +254,8 @@ class Tray:
                 self.charging = result["charging"]
             if result["idle"] is not None:
                 self.idle = result["idle"]
+            if result["lighting"] is not None:
+                self.lighting_actions[result["lighting"]].setChecked(True)
             self.last_read = time.time()
             self.log_reading()
             self.check_notifications()

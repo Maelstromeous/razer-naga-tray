@@ -15,6 +15,8 @@ TRANSACTION_ID = 0x1F
 NOSTORE, VARSTORE = 0x00, 0x01  # live state, and the copy saved on the mouse
 # The ids this mouse answers to through the dock; OpenRazer's scroll/side ids (0x01, 0x10, 0x11) fail.
 LEDS = {"logo": 0x04, "backlight": 0x05}
+EFFECT_NONE, EFFECT_SPECTRUM = 0x00, 0x03
+ON_BRIGHTNESS = 84  # 33%, what the mouse shipped with here
 POLL_RATES = {0x01: 1000, 0x02: 500, 0x08: 125}
 STATUS = {0x01: "busy", 0x02: "ok", 0x03: "failed", 0x04: "timed out", 0x05: "not supported"}
 REPORT_LEN = 90
@@ -165,15 +167,19 @@ class NagaV2Pro:
     def led_brightness(self, led):
         return pct(self.request(0x0F, 0x84, 0x03, (NOSTORE, led))[2])
 
-    def lights_off(self):
+    def lighting_on(self):
+        return any(self.led_brightness(led) for led in LEDS.values())
+
+    def set_lighting(self, on):
         """Returns {led name: True if the mouse accepted it}."""
+        effect, brightness = (EFFECT_SPECTRUM, ON_BRIGHTNESS) if on else (EFFECT_NONE, 0)
         result = {}
         for name, led in LEDS.items():
             try:
-                # Saving alone leaves the LED lit until the next power cycle, so set both.
+                # Saving alone leaves the LED as it was until the next power cycle, so set both.
                 for store in (NOSTORE, VARSTORE):
-                    self.request(0x0F, 0x02, 0x06, (store, led, 0x00))
-                    self.request(0x0F, 0x04, 0x03, (store, led, 0x00))
+                    self.request(0x0F, 0x02, 0x06, (store, led, effect))
+                    self.request(0x0F, 0x04, 0x03, (store, led, brightness))
                 result[name] = True
             except MouseAsleep:
                 raise
