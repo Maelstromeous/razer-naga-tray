@@ -6,7 +6,7 @@ It talks to the mouse over raw HID, so it needs no OpenRazer kernel driver. That
 
 ## What it does
 
-- Shows the battery level in the tray, coloured by level, and blue while charging.
+- Shows the battery level in the tray as a small battery that fills as it charges: green while charging, your panel's text colour on battery, red at 20% or below.
 - Sends a notification at 20%, 10% and 5%, and when the mouse is fully charged.
 - Estimates the time to full while charging, and the time left and drain rate per hour while in use.
 - Updates the moment the mouse is placed on or lifted off the Mouse Dock Pro, using the dock's own reports, and the moment a cable, dongle or dock is plugged in or removed.

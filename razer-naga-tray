@@ -11,7 +11,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from PyQt6.QtCore import QObject, QRectF, Qt, QTimer, pyqtSignal  # noqa: E402
-from PyQt6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap  # noqa: E402
+from PyQt6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPainterPath, QPalette, QPen, QPixmap  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QColorDialog, QMenu, QSystemTrayIcon  # noqa: E402
 
 from battery_stats import Session  # noqa: E402
@@ -97,29 +97,70 @@ def level_colour(level):
     return QColor("#46a758")
 
 
-def render_icon(level, charging, stale):
-    size = 64
+CHARGING = QColor("#46a758")
+LOW = QColor("#e5484d")
+LOW_AT = 20
+EMPTY = QColor(0, 0, 0, 70)
+GREY = QColor("#8a8a8a")
+
+
+def panel_colour():
+    """The theme's text colour, so the on-battery icon is white on a dark panel and dark on a light one."""
+    return QApplication.palette().color(QPalette.ColorRole.WindowText)
+
+
+def render_icon(level, charging, stale, plain=None):
+    """A battery: fill grows from the left while charging, and drains toward the right on battery."""
+    plain = plain or panel_colour()
+    outline = GREY if stale else CHARGING if charging else plain
+    size, stroke, radius = 64, 5, 13
     pix = QPixmap(size, size)
     pix.fill(Qt.GlobalColor.transparent)
     p = QPainter(pix)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-    # A bolt overlay is illegible at tray size, so charging gets its own colour.
-    colour = QColor("#8a8a8a") if stale else QColor("#0090ff") if charging else level_colour(level)
+    body = QRectF(stroke / 2 + 1, stroke / 2 + 1, size - stroke - 2, size - stroke - 2)
     p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(colour)
-    p.drawRoundedRect(QRectF(2, 2, size - 4, size - 4), 14, 14)
+    p.setBrush(EMPTY)
+    p.drawRoundedRect(body, radius, radius)
+
+    fill_rect, fill = None, None
+    if level is not None:
+        inner = body.adjusted(stroke / 2, stroke / 2, -stroke / 2, -stroke / 2)
+        width = inner.width() * max(0, min(100, level)) / 100
+        x = inner.left() if charging else inner.right() - width
+        clip = QPainterPath()
+        clip.addRoundedRect(inner, radius - stroke / 2, radius - stroke / 2)
+        p.setClipPath(clip)
+        fill = GREY if stale else LOW if level <= LOW_AT else CHARGING if charging else plain
+        fill_rect = QRectF(x, inner.top(), width, inner.height())
+        p.setBrush(fill)
+        p.drawRect(fill_rect)
+        p.setClipping(False)
+
+    p.setPen(QPen(outline, stroke))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawRoundedRect(body, radius, radius)
 
     text = "?" if level is None else str(level)
-    font = QFont("Sans", 34 if len(text) < 3 else 25, QFont.Weight.Black)
+    # Medium, not Black: at tray size a heavy weight fills in the holes of 8, 0 and 6.
+    font = QFont("Sans", 31 if len(text) < 3 else 21, QFont.Weight.Medium)
     path = QPainterPath()
     path.addText(0, 0, font, text)
     box = path.boundingRect()
     path.translate((size - box.width()) / 2 - box.left(), (size - box.height()) / 2 - box.top())
-    p.setPen(QPen(QColor(0, 0, 0, 90), 3))
+    p.setPen(QPen(QColor(0, 0, 0, 170), 2))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawPath(path)  # dark edge first, so the white reads over both fill and empty
+    p.setPen(Qt.PenStyle.NoPen)
     p.setBrush(QColor("white"))
     p.drawPath(path)
-
+    if fill is plain and plain.lightness() > 128:
+        # White on a white fill vanishes, so the part of the number over the fill is inverted.
+        p.setClipRect(fill_rect)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#1b1e20"))
+        p.drawPath(path)
     p.end()
     return QIcon(pix)
 
