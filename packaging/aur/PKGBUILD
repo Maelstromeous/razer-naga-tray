@@ -1,0 +1,33 @@
+# Maintainer: Matt Cavanagh <1776058+Maelstromeous@users.noreply.github.com>
+pkgname=razer-naga-tray
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Tray battery monitor for the Razer Naga V2 Pro and Mouse Dock Pro, no OpenRazer driver needed'
+arch=('any')
+url='https://github.com/Maelstromeous/razer-naga-tray'
+license=('MIT')
+depends=('python' 'python-pyqt6' 'python-pyudev' 'libnotify' 'glib2')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('24a3490470212e7d4d857c51a43bbe5646b465806fff128b4367c01df1edaf3d')
+
+package() {
+  cd "$pkgname-$pkgver"
+  local lib="/usr/lib/$pkgname"
+
+  install -Dm644 razer_naga.py battery_stats.py -t "$pkgdir$lib/"
+  install -Dm755 razer-naga-tray razer-naga-power -t "$pkgdir$lib/"
+  python -m compileall -q -d "$lib" "$pkgdir$lib"
+
+  install -d "$pkgdir/usr/bin"
+  ln -s "$lib/razer-naga-tray" "$pkgdir/usr/bin/razer-naga-tray"
+  ln -s "$lib/razer-naga-power" "$pkgdir/usr/bin/razer-naga-power"
+
+  install -Dm644 70-razer-naga.rules -t "$pkgdir/usr/lib/udev/rules.d/"
+
+  sed 's|@BIN@|/usr/bin|' razer-naga-tray.desktop > razer-naga-tray.desktop.out
+  install -Dm644 razer-naga-tray.desktop.out "$pkgdir/usr/share/applications/razer-naga-tray.desktop"
+  install -Dm644 razer-naga-tray.desktop.out "$pkgdir/etc/xdg/autostart/razer-naga-tray.desktop"
+
+  install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname/"
+  install -Dm644 README.md -t "$pkgdir/usr/share/doc/$pkgname/"
+}
