@@ -1,18 +1,17 @@
-"""Charge and drain rate from the battery history, for "full in" and "time left" estimates.
+"""Charge and drain estimates from the battery history.
 
-The mouse's gauge moves in whole percents (2-3 raw steps of 255), ticking about once a minute
-on the cable. So the rate comes from the times of those ticks, and the tray polls fast while
-charging to time them closely. Rates are kept per source (cable, dock, in use) and remembered,
-so the next session has an estimate before its own ticks arrive.
+The gauge moves in whole percents and batteries do not charge or drain at a constant rate,
+so the history is turned into a curve: seconds per percent at each level band, per source
+(cable, dock, in use). An estimate walks the remaining levels along that curve, scaled by
+how this session compares, and falls back to the live rate where the curve has no data yet.
 """
-import json
-import os
+import statistics
 import time
 
-RAW_FULL = 255
-WINDOW = {"cable": 20 * 60, "dock": 20 * 60, "use": 3 * 3600}
-MIN_INTERVALS = 2  # three ticks
-LEARN_AFTER = 5  # intervals before a session's rate is worth remembering
+BAND = 5  # percent per curve band
+MAX_TICK = {"cable": 15 * 60, "dock": 30 * 60, "use": 6 * 3600}  # longer gaps are downtime, not a tick
+RECENT_TICKS = 6  # the live rate is read from this many recent ticks
+MIN_TICKS = 3
 
 
 def source_of(link, charging):
@@ -21,14 +20,8 @@ def source_of(link, charging):
     return "cable" if link == "USB cable" else "dock"
 
 
-def slope_per_hour(points):
-    n = len(points)
-    mean_t = sum(t for t, _ in points) / n
-    mean_r = sum(r for _, r in points) / n
-    var = sum((t - mean_t) ** 2 for t, _ in points)
-    if var == 0:
-        return None
-    return sum((t - mean_t) * (r - mean_r) for t, r in points) / var * 3600
+def pct(raw):
+    return round(raw * 100 / 255)
 
 
 def duration(hours):
@@ -42,31 +35,31 @@ def duration(hours):
 
 
 class Session:
-    """Ticks since the charging source last changed: (unix time, raw) at each change of level."""
+    """Ticks since the source last changed, plus the curve learned from every past session."""
 
-    def __init__(self, learned_path=None):
+    def __init__(self):
         self.source = None
-        self.points = []
-        self.learned_path = learned_path
-        self.learned = {}
-        if learned_path:
-            try:
-                with open(learned_path) as f:
-                    self.learned = json.load(f)
-            except (OSError, ValueError):
-                pass
+        self.ticks = []  # (unix time, percent) at each change of level; the first is the session start
+        self.curve = {}  # source -> band -> [seconds per percent, ...]
 
-    def add(self, t, raw, link, charging, learn=True):
-        source = source_of(link, charging)
+    def add(self, t, raw, link, charging):
+        source, level = source_of(link, charging), pct(raw)
         if source != self.source:
-            self.source, self.points = source, [(t, raw)]
-        elif raw != self.points[-1][1]:
-            self.points.append((t, raw))
-            if learn:
-                self._learn(t)
+            self.source, self.ticks = source, [(t, level)]
+            return
+        if level == self.ticks[-1][1]:
+            return
+        # The session's first point is when it began, not a tick, so the first interval is partial.
+        if len(self.ticks) > 1:
+            (t0, p0) = self.ticks[-1]
+            steps = abs(level - p0)
+            if 0 < t - t0 <= MAX_TICK[source] and steps <= 2:
+                band = min(p0, level) // BAND
+                self.curve.setdefault(source, {}).setdefault(band, []).append((t - t0) / steps)
+        self.ticks.append((t, level))
 
     def load(self, path):
-        """Resume from the history file, so a restart keeps the ticks it had seen."""
+        """Rebuild the curve and the current session from the history file."""
         try:
             with open(path) as f:
                 rows = [line.strip().split(",") for line in f]
@@ -79,41 +72,52 @@ class Session:
                 t = time.mktime(time.strptime(row[0], "%Y-%m-%dT%H:%M:%S"))
             except ValueError:
                 continue
-            self.add(t, int(row[4]), row[3], row[2] == "1", learn=False)
+            self.add(t, int(row[4]), row[3], row[2] == "1")
 
-    def measured(self, now):
-        """Raw steps per hour from this session's own ticks, and how many intervals it rests on."""
-        # The first point is where the session began, not a tick, so its time says nothing.
-        ticks = [(t, r) for t, r in self.points[1:] if t >= now - WINDOW[self.source]]
-        if len(ticks) < MIN_INTERVALS + 1:
-            return None, 0
-        return slope_per_hour(ticks), len(ticks) - 1
-
-    def _learn(self, now):
-        rate, intervals = self.measured(now)
-        if rate and intervals >= LEARN_AFTER and self.learned_path:
-            self.learned[self.source] = rate
-            try:
-                os.makedirs(os.path.dirname(self.learned_path), exist_ok=True)
-                with open(self.learned_path, "w") as f:
-                    json.dump(self.learned, f)
-            except OSError:
-                pass
-
-    def summary(self, now, raw):
-        """One line for the tooltip and menu, or None when there is nothing to say."""
-        if self.source is None or (self.source != "use" and raw >= RAW_FULL):
+    def live_seconds_per_percent(self):
+        ticks = self.ticks[1:][-RECENT_TICKS:]
+        if len(ticks) < MIN_TICKS:
             return None
-        rate, _ = self.measured(now)
-        guess = rate is None
-        if guess:
-            rate = self.learned.get(self.source)
-        if self.source == "use":
-            if not rate or rate >= 0:
-                return "ETA: Calculating"
-            text = f"About {duration(raw / -rate)} left (-{-rate * 100 / RAW_FULL:.1f}%/h)"
+        span = ticks[-1][0] - ticks[0][0]
+        steps = abs(ticks[-1][1] - ticks[0][1])
+        return span / steps if steps else None
+
+    def curve_at(self, level):
+        samples = self.curve.get(self.source, {}).get(level // BAND)
+        return statistics.median(samples) if samples else None
+
+    def remaining_hours(self, level):
+        """Hours to full (charging) or to empty (in use), and the live %/h. None until there is data."""
+        charging = self.source != "use"
+        live = self.live_seconds_per_percent()
+        here = self.curve_at(level)
+        # This session against the curve at the same level: a warm or worn battery runs off the curve.
+        scale = max(0.7, min(1.4, live / here)) if live and here else 1.0
+        levels = range(level, 100) if charging else range(level - 1, -1, -1)
+        total = 0.0
+        for p in levels:
+            per = self.curve_at(p)
+            if per is None:
+                per = live or here
+                if per is None:
+                    return None, None
+                total += per
+            else:
+                total += per * scale
+        return total / 3600, (3600 / live if live else None)
+
+    def summary(self, level):
+        """One line for the tooltip and menu, or None when there is nothing to say."""
+        if self.source is None or (self.source != "use" and level >= 100):
+            return None
+        hours, live_rate = self.remaining_hours(level)
+        if hours is None:
+            return "ETA: Calculating"
+        if live_rate:
+            sign = "+" if self.source != "use" else "-"
+            rate = f" ({sign}{live_rate:.1f}%/h now)" if live_rate < 10 else f" ({sign}{live_rate:.0f}%/h now)"
         else:
-            if not rate or rate <= 0:
-                return "ETA: Calculating"
-            text = f"Full in about {duration((RAW_FULL - raw) / rate)} (+{rate * 100 / RAW_FULL:.0f}%/h)"
-        return text + (", from last time" if guess else "")
+            rate = ", from past charges" if self.source != "use" else ", from past use"
+        if self.source == "use":
+            return f"About {duration(hours)} left" + rate
+        return f"Full in about {duration(hours)}" + rate

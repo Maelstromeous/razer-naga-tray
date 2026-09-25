@@ -24,7 +24,6 @@ WARN_AT = (20, 10, 5)
 IDLE_CHOICES = (60, 120, 300, 600, 900)
 APP_NAME = "Razer mouse"
 HISTORY = os.path.expanduser("~/.local/state/razer-tray/battery.csv")
-LEARNED_RATES = os.path.expanduser("~/.local/state/razer-tray/rates.json")
 SETTINGS = os.path.expanduser("~/.config/razer-tray/settings.json")
 RING_BRIGHTNESS = {"Low": 64, "Medium": 128, "High": 204}
 RING_EVERY = {True: 60, False: 10 * 60}  # seconds between colour updates, by charging state
@@ -257,7 +256,7 @@ class Tray:
         self.last_logged = None
         self.raw = None
         self.low_notification = None
-        self.session = Session(LEARNED_RATES)
+        self.session = Session()
         self.settings = load_settings()
         self.ring_sent = None  # (colour, brightness, charging) last written to the dock
         self.ring_sent_at = 0
@@ -418,7 +417,7 @@ class Tray:
             notify("Can't read the mouse", result["error"], "critical")
 
         stale = state != "ok"
-        self.eta = None if stale else self.session.summary(time.time(), self.raw)
+        self.eta = None if stale else self.session.summary(self.level)
         self.eta_action.setText(self.eta or "")
         self.eta_action.setVisible(bool(self.eta))
         self.icon.setIcon(render_icon(self.level, self.charging and not stale, stale))
