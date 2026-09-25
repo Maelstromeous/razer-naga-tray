@@ -12,7 +12,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from PyQt6.QtCore import QObject, QRectF, Qt, QTimer, pyqtSignal  # noqa: E402
 from PyQt6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap  # noqa: E402
-from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon  # noqa: E402
+from PyQt6.QtWidgets import QApplication, QColorDialog, QMenu, QSystemTrayIcon  # noqa: E402
 
 from battery_stats import Session  # noqa: E402
 from razer_naga import (DOCK_EVENTS, EVENT_INTERFACE, EVENT_REPORT_ID, MouseAsleep, NagaV2Pro,  # noqa: E402
@@ -26,9 +26,21 @@ APP_NAME = "Razer mouse"
 HISTORY = os.path.expanduser("~/.local/state/razer-tray/battery.csv")
 SETTINGS = os.path.expanduser("~/.config/razer-tray/settings.json")
 RING_BRIGHTNESS = {"Low": 64, "Medium": 128, "High": 204}
-RING_EVERY = {True: 60, False: 10 * 60}  # seconds between colour updates, by charging state
+RING_EVERY = {True: 60, False: 10 * 60}
+RING_CHARGED_AT, RING_CHARGED = 95, (0, 0, 255)  # on a charger and near full: blue, whatever the source  # seconds between colour updates, by charging state
 # Tuned by eye on the dock: its LEDs run green-heavy, so warm shades need far less green than on screen.
 RING_STOPS = ((0, (255, 0, 0)), (15, (255, 30, 0)), (40, (255, 90, 0)), (70, (160, 200, 0)), (100, (0, 255, 0)))
+
+
+def led_colour(rgb):
+    """Screen colours are gamma-encoded and the dock's LEDs are linear, so decode before sending."""
+    return tuple(round(255 * (c / 255) ** 2.2) for c in rgb)
+
+
+def swatch(rgb):
+    pix = QPixmap(16, 16)
+    pix.fill(QColor(*rgb))
+    return QIcon(pix)
 
 
 def ring_colour(level):
@@ -260,6 +272,7 @@ class Tray:
         self.settings = load_settings()
         self.ring_sent = None  # (colour, brightness, charging) last written to the dock
         self.ring_sent_at = 0
+        self.previewing = False
         self.session.load(HISTORY)
 
         self.reader = Reader()
@@ -302,12 +315,19 @@ class Tray:
 
         ring_menu = menu.addMenu("Dock ring")
         self.ring_group = QActionGroup(ring_menu)
-        for mode, label in (("level", "Charge level"), ("off", "Off")):
+        self.ring_actions = {}
+        for mode, label in (("level", "Charge level"), ("custom", "Custom colour…"), ("off", "Off")):
             action = QAction(label, ring_menu, checkable=True)
             action.setChecked(self.settings.get("dock_ring", "level") == mode)
-            action.triggered.connect(lambda _, mode=mode: self.set_ring_mode(mode))
+            if mode == "custom":
+                action.triggered.connect(self.pick_colour)
+                if "dock_colour" in self.settings:
+                    action.setIcon(swatch(self.settings["dock_colour"]))
+            else:
+                action.triggered.connect(lambda _, mode=mode: self.set_ring_mode(mode))
             self.ring_group.addAction(action)
             ring_menu.addAction(action)
+            self.ring_actions[mode] = action
         ring_menu.addSeparator()
         self.brightness_group = QActionGroup(ring_menu)
         for name in RING_BRIGHTNESS:
@@ -359,23 +379,62 @@ class Tray:
         save_settings(self.settings)
         self.update_ring()
 
+    def pick_colour(self):
+        """Colour dialog that previews on the ring as you drag; Cancel puts the old mode back."""
+        start = QColor(*self.settings.get("dock_colour", (0, 160, 255)))
+        dialog = QColorDialog(start)
+        dialog.setWindowTitle("Dock ring colour")
+        self.previewing = True
+        self.preview_rgb = None
+        preview_timer = QTimer(singleShot=True, interval=80)
+
+        def send_preview():
+            rgb = led_colour(self.preview_rgb)
+            brightness = RING_BRIGHTNESS.get(self.settings.get("dock_brightness"), RING_BRIGHTNESS["Medium"])
+            self.reader.run(lambda mouse: (dock_set_colour(rgb, brightness), {"state": "dock"})[1])
+
+        def changed(colour):
+            self.preview_rgb = colour.getRgb()[:3]
+            if not preview_timer.isActive():
+                preview_timer.start()  # at most one write per 80 ms while dragging
+
+        preview_timer.timeout.connect(send_preview)
+        dialog.currentColorChanged.connect(changed)
+        accepted = dialog.exec() == QColorDialog.DialogCode.Accepted
+        preview_timer.stop()
+        self.previewing = False
+        self.ring_sent = None  # whatever the preview left on the ring gets rewritten
+        if accepted:
+            self.settings["dock_colour"] = list(dialog.currentColor().getRgb()[:3])
+            self.ring_actions["custom"].setIcon(swatch(self.settings["dock_colour"]))
+            self.set_ring_mode("custom")
+        else:
+            self.ring_actions[self.settings.get("dock_ring", "level")].setChecked(True)
+            self.update_ring()
+
     def set_ring_brightness(self, name):
         self.settings["dock_brightness"] = name
         save_settings(self.settings)
         self.update_ring()
 
     def update_ring(self):
-        if self.settings.get("dock_ring", "level") == "off":
-            wanted = ((0, 0, 0), 0, self.charging)
+        if self.previewing:
+            return
+        mode = self.settings.get("dock_ring", "level")
+        brightness = RING_BRIGHTNESS.get(self.settings.get("dock_brightness"), RING_BRIGHTNESS["Medium"])
+        if mode == "off":
+            wanted = ((0, 0, 0), 0, self.charging, mode)
+        elif mode == "custom":
+            wanted = (led_colour(self.settings.get("dock_colour", (0, 160, 255))), brightness, self.charging, mode)
         elif self.level is None:
             return
         else:
-            brightness = RING_BRIGHTNESS.get(self.settings.get("dock_brightness"), RING_BRIGHTNESS["Medium"])
-            wanted = (ring_colour(self.level), brightness, self.charging)
+            charged = self.charging and self.level >= RING_CHARGED_AT
+            wanted = (RING_CHARGED if charged else ring_colour(self.level), brightness, self.charging, mode)
         if wanted == self.ring_sent:
             return
         # A colour drift waits its turn; a mode, brightness or charging change goes out at once.
-        only_drift = self.ring_sent and self.ring_sent[1:] == wanted[1:]
+        only_drift = self.ring_sent and self.ring_sent[1:] == wanted[1:] and mode == "level"
         if only_drift and time.time() - self.ring_sent_at < RING_EVERY[self.charging]:
             return
         brightness = None if self.ring_sent and self.ring_sent[1] == wanted[1] else wanted[1]
