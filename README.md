@@ -25,10 +25,12 @@ Python 3 with PyQt6, `notify-send` (libnotify) and `gdbus`. With pyudev installe
 
 ## Install
 
-On Arch, from the AUR:
+On Arch, build the package from this repository (it goes on the AUR as `razer-naga-tray` once new AUR accounts open again):
 
 ```sh
-paru -S razer-naga-tray
+git clone https://github.com/Maelstromeous/razer-naga-tray.git
+cd razer-naga-tray/packaging/aur
+makepkg -si
 ```
 
 The package installs the udev rule and starts the tray at login. By hand instead:
