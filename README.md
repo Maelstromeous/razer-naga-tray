@@ -1,4 +1,4 @@
-# razer-tray
+# razer-naga-tray
 
 A system tray battery monitor for the Razer Naga V2 Pro on Linux, built for KDE Plasma.
 
@@ -13,7 +13,7 @@ It talks to the mouse over raw HID, so it needs no OpenRazer kernel driver. That
 - Closes any low battery warning as soon as the mouse starts charging.
 - Colours the Mouse Dock Pro's ring by charge level, from red through orange and yellow to green, at a brightness you pick. It turns blue once the mouse reaches 95% on any charger. Or pick any colour of your own, previewed live on the ring as you choose it.
 - Switches the mouse lighting on or off and sets the idle sleep timer from the tray menu.
-- Keeps a battery history in `~/.local/state/razer-tray/battery.csv`, so you can see how fast it drains.
+- Keeps a battery history in `~/.local/state/razer-naga-tray/battery.csv`, so you can see how fast it drains.
 
 The mouse's battery gauge moves in whole percents, ticking about once a minute on the cable. While charging the tray checks every 10 seconds to time those ticks. Batteries charge and drain on a curve rather than a straight line, so the tray learns how long each percent takes at each level, separately for the cable, the dock and normal use, from its own history. Estimates follow that curve, adjusted to how the current session compares. The first charge relies on the live rate and runs optimistic near the top; each full charge after that sharpens it.
 
@@ -25,13 +25,21 @@ Python 3 with PyQt6, `notify-send` (libnotify) and `gdbus`. With pyudev installe
 
 ## Install
 
+On Arch, from the AUR:
+
+```sh
+paru -S razer-naga-tray
+```
+
+The package installs the udev rule and starts the tray at login. By hand instead:
+
 ```sh
 ./install.sh
 sudo install -m644 70-razer-naga.rules /etc/udev/rules.d/
 sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=hidraw
 ```
 
-`install.sh` links `razer-tray` and `razer-naga-power` into `~/.local/bin` and starts the tray at login. The udev rule lets the logged-in user open the mouse, dongle and dock without root.
+`install.sh` links `razer-naga-tray` and `razer-naga-power` into `~/.local/bin` and starts the tray at login. The udev rule lets the logged-in user open the mouse, dongle and dock without root.
 
 ## Command line
 

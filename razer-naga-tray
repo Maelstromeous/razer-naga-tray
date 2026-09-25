@@ -23,8 +23,8 @@ CHARGING_POLL_SECONDS = 10  # the gauge ticks ~once a minute on charge; time the
 WARN_AT = (20, 10, 5)
 IDLE_CHOICES = (60, 120, 300, 600, 900)
 APP_NAME = "Razer mouse"
-HISTORY = os.path.expanduser("~/.local/state/razer-tray/battery.csv")
-SETTINGS = os.path.expanduser("~/.config/razer-tray/settings.json")
+HISTORY = os.path.expanduser("~/.local/state/razer-naga-tray/battery.csv")
+SETTINGS = os.path.expanduser("~/.config/razer-naga-tray/settings.json")
 RING_BRIGHTNESS = {"Low": 64, "Medium": 128, "High": 204}
 RING_EVERY = {True: 60, False: 10 * 60}
 RING_CHARGED_AT, RING_CHARGED = 95, (0, 0, 255)  # on a charger and near full: blue, whatever the source  # seconds between colour updates, by charging state
@@ -528,10 +528,25 @@ class Tray:
                                            replaces=self.low_notification)
 
 
+def already_running():
+    """Holds a lock for the process's lifetime; a second copy (say two autostart entries) exits."""
+    import fcntl
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or os.path.expanduser("~/.cache")
+    global _lock
+    _lock = open(os.path.join(runtime, "razer-naga-tray.lock"), "w")
+    try:
+        fcntl.flock(_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False
+    except OSError:
+        return True
+
+
 def main():
+    if already_running():
+        sys.exit("razer-naga-tray is already running.")
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
-    app.setDesktopFileName("razer-tray")
+    app.setDesktopFileName("razer-naga-tray")
     app.setQuitOnLastWindowClosed(False)
     if not QSystemTrayIcon.isSystemTrayAvailable():
         sys.exit("No system tray available.")

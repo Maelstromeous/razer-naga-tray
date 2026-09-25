@@ -2,7 +2,7 @@
 Type=Application
 Name=Razer mouse battery
 Comment=Tray icon with battery level and low-battery warnings for the Naga V2 Pro
-Exec=@BIN@/razer-tray
+Exec=@BIN@/razer-naga-tray
 Icon=input-mouse
 Terminal=false
 Categories=Utility;
