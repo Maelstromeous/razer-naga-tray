@@ -190,7 +190,7 @@ def panel_colour():
 
 
 def render_icon(level, charging, stale, plain=None):
-    """A battery: fill grows from the left while charging, and drains toward the right on battery."""
+    """A battery: the fill sits on the left and empties toward it, charging or not."""
     plain = plain or panel_colour()
     full = charging and level is not None and level >= 100
     outline = GREY if stale else FULL if full else CHARGING if charging else plain
@@ -209,7 +209,7 @@ def render_icon(level, charging, stale, plain=None):
     if level is not None:
         inner = body.adjusted(stroke / 2, stroke / 2, -stroke / 2, -stroke / 2)
         width = inner.width() * max(0, min(100, level)) / 100
-        x = inner.left() if charging else inner.right() - width
+        x = inner.left()
         clip = QPainterPath()
         clip.addRoundedRect(inner, radius - stroke / 2, radius - stroke / 2)
         p.setClipPath(clip)

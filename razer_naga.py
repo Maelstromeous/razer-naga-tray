@@ -8,7 +8,7 @@ import glob
 import os
 import time
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 VENDOR = "00001532"
 # Probe order: dock first, it is the usual link here.
 LINKS = {"000000A4": "Mouse Dock Pro", "000000A8": "wireless dongle", "000000A7": "USB cable"}
