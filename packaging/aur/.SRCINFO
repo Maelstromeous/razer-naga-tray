@@ -1,6 +1,6 @@
 pkgbase = razer-naga-tray
 	pkgdesc = Tray battery monitor for the Razer Naga V2 Pro and Mouse Dock Pro, no OpenRazer driver needed
-	pkgver = 0.1.4
+	pkgver = 1.0.0
 	pkgrel = 1
 	url = https://github.com/Maelstromeous/razer-naga-tray
 	arch = any
@@ -10,7 +10,8 @@ pkgbase = razer-naga-tray
 	depends = python-pyudev
 	depends = libnotify
 	depends = glib2
-	source = razer-naga-tray-0.1.4.tar.gz::https://github.com/Maelstromeous/razer-naga-tray/archive/refs/tags/v0.1.4.tar.gz
-	sha256sums = fb519bc6b9d6261c0dd4c898118d4b7fe8d83a19da57775f898dc455732326e9
+	optdepends = noto-fonts-emoji: battery symbol in the tooltip
+	source = razer-naga-tray-1.0.0.tar.gz::https://github.com/Maelstromeous/razer-naga-tray/archive/refs/tags/v1.0.0.tar.gz
+	sha256sums = 68b4d990a869c662bcc0ada851c65a30005ce5f91b04b80d01e5ee5ed85c22f4
 
 pkgname = razer-naga-tray
