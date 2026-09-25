@@ -222,3 +222,10 @@ def dock_set_colour(rgb, brightness=None):
     for _ in range(2):
         ok &= dock_command(0x0F, 0x02, 0x09, (NOSTORE, DOCK_LED, 0x01, 0x00, 0x00, 0x01, *rgb))
     return ok
+
+
+def dock_set_frame(rgb):
+    """The whole ring one colour via a custom frame. Unlike the static effect, a frame shows at
+    once every time, so it is what blinks."""
+    return (dock_command(0x0F, 0x03, 5 + 24, [0, 0, 0, 0, 7] + list(rgb) * 8)
+            and dock_command(0x0F, 0x02, 0x0C, (0x00, 0x00, 0x08)))

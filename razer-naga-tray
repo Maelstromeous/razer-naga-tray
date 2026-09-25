@@ -16,13 +16,15 @@ from PyQt6.QtWidgets import QApplication, QColorDialog, QMenu, QSystemTrayIcon  
 
 from battery_stats import Session  # noqa: E402
 from razer_naga import (DOCK_EVENTS, EVENT_INTERFACE, EVENT_REPORT_ID, MouseAsleep, NagaV2Pro,  # noqa: E402
-                        NoPermission, NoReceiver, RazerError, dock_set_colour, find_links, pct)
+                        NoPermission, NoReceiver, RazerError, dock_set_colour, dock_set_frame,
+                        find_links, pct)
 
 POLL_SECONDS = 60
 CHARGING_POLL_SECONDS = 10  # the gauge ticks ~once a minute on charge; time the ticks closely
 WARN_AT = (20, 10, 5)
 IDLE_CHOICES = (60, 120, 300, 600, 900)
 APP_NAME = "Razer mouse"
+SHORT_LINK = {"USB cable": "USB", "Mouse Dock Pro": "dock", "wireless dongle": "dongle"}
 HISTORY = os.path.expanduser("~/.local/state/razer-naga-tray/battery.csv")
 SETTINGS = os.path.expanduser("~/.config/razer-naga-tray/settings.json")
 RING_BRIGHTNESS = {"Low": 64, "Medium": 128, "High": 204}
@@ -98,6 +100,7 @@ def level_colour(level):
 
 
 CHARGING = QColor("#46a758")
+FULL = QColor("#3b82f6")
 LOW = QColor("#e5484d")
 LOW_AT = 20
 EMPTY = QColor(0, 0, 0, 70)
@@ -112,7 +115,8 @@ def panel_colour():
 def render_icon(level, charging, stale, plain=None):
     """A battery: fill grows from the left while charging, and drains toward the right on battery."""
     plain = plain or panel_colour()
-    outline = GREY if stale else CHARGING if charging else plain
+    full = charging and level is not None and level >= 100
+    outline = GREY if stale else FULL if full else CHARGING if charging else plain
     size, stroke, radius = 64, 5, 13
     pix = QPixmap(size, size)
     pix.fill(Qt.GlobalColor.transparent)
@@ -132,7 +136,7 @@ def render_icon(level, charging, stale, plain=None):
         clip = QPainterPath()
         clip.addRoundedRect(inner, radius - stroke / 2, radius - stroke / 2)
         p.setClipPath(clip)
-        fill = GREY if stale else LOW if level <= LOW_AT else CHARGING if charging else plain
+        fill = GREY if stale else FULL if full else LOW if level <= LOW_AT else CHARGING if charging else plain
         fill_rect = QRectF(x, inner.top(), width, inner.height())
         p.setBrush(fill)
         p.drawRect(fill_rect)
@@ -314,6 +318,7 @@ class Tray:
         self.ring_sent = None  # (colour, brightness, charging) last written to the dock
         self.ring_sent_at = 0
         self.previewing = False
+        self.blinking = False
         self.session.load(HISTORY)
 
         self.reader = Reader()
@@ -459,7 +464,7 @@ class Tray:
         self.update_ring()
 
     def update_ring(self):
-        if self.previewing:
+        if self.previewing or self.blinking:
             return
         mode = self.settings.get("dock_ring", "level")
         brightness = RING_BRIGHTNESS.get(self.settings.get("dock_brightness"), RING_BRIGHTNESS["Medium"])
@@ -494,6 +499,7 @@ class Tray:
         if state == "dock":
             return
         if state == "ok":
+            previous = self.level
             self.raw, self.link = result["raw"], result["link"]
             self.level = pct(self.raw)
             if result["charging"] is not None:
@@ -508,7 +514,7 @@ class Tray:
                 self.lighting_actions[result["lighting"]].setChecked(True)
             self.last_read = time.time()
             self.log_reading()
-            self.check_notifications()
+            self.check_notifications(previous)
             self.update_ring()
             for seconds, action in self.idle_actions.items():
                 action.setChecked(seconds == self.idle)
@@ -544,20 +550,43 @@ class Tray:
         else:
             known = f"Battery {self.level}%" + (", charging" if self.charging else "")
         if state == "ok":
-            return f"{known}\n" + (f"{self.eta}\n" if self.eta else "") + f"Via the {self.link}"
+            via = SHORT_LINK.get(self.link, self.link)
+            line = f"Battery {self.level}%, " + (f"charging via {via}" if self.charging else f"connected to {via}")
+            return line + (f"\n{self.eta}" if self.eta else "")
         age = f" (as of {time.strftime('%H:%M', time.localtime(self.last_read))})" if self.last_read else ""
         reason = {"asleep": "Mouse asleep or out of range", "no-receiver": "No dock or dongle found"}.get(state, error)
         return f"{known}{age}\n{reason}"
 
-    def check_notifications(self):
+    def blink_charged(self, seconds=10, interval_ms=500):
+        """Flash the ring blue, then hand it back to update_ring, which leaves it solid blue."""
+        if self.settings.get("dock_ring", "level") != "level":
+            return
+        self.blinking = True
+        steps = seconds * 1000 // interval_ms
+
+        def step(i):
+            if i >= steps:
+                self.blinking = False
+                self.ring_sent = None
+                self.update_ring()
+                return
+            # Frames, not the static effect or brightness: neither of those visibly blinks on this dock.
+            rgb = RING_CHARGED if i % 2 == 0 else (0, 0, 0)
+            self.reader.run(lambda mouse: (dock_set_frame(rgb), {"state": "dock"})[1])
+            QTimer.singleShot(interval_ms, lambda: step(i + 1))
+        step(0)
+
+    def check_notifications(self, previous):
         if self.charging:
             self.warned.clear()
             if self.low_notification:
                 close_notification(self.low_notification)
                 self.low_notification = None
-            if self.level >= 100 and not self.told_full:
+            # Only on seeing it reach 100, so starting the tray with a full mouse stays quiet.
+            if self.level >= 100 and previous is not None and previous < 100 and not self.told_full:
                 self.told_full = True
-                notify("Mouse fully charged", "You can take it off the dock.")
+                notify("Mouse fully charged", f"Charged via {SHORT_LINK.get(self.link, self.link)}.")
+                self.blink_charged()
             return
         self.told_full = False
         crossed = {t for t in WARN_AT if self.level <= t}
