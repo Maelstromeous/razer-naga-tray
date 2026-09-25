@@ -563,6 +563,7 @@ class Tray:
             return
         self.blinking = True
         steps = seconds * 1000 // interval_ms
+        steps += steps % 2 == 0  # an odd count ends on a lit step, so solid blue follows with no dark gap
 
         def step(i):
             if i >= steps:
