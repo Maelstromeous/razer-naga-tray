@@ -8,11 +8,12 @@ It talks to the mouse over raw HID, so it needs no OpenRazer kernel driver. That
 
 - Shows the battery level in the tray as a small battery that fills as it charges: green while charging, blue once full, your panel's text colour on battery, red at 20% or below.
 - Sends a notification at 20%, 10% and 5%, and when the mouse is fully charged, when the Mouse Dock Pro ring also blinks blue.
-- Estimates the time to full while charging, and the time left and drain rate per hour while in use.
+- Estimates the time to full while charging. Drain is logged but not estimated, since it depends on how the mouse is used and when it sleeps.
 - Updates the moment the mouse is placed on or lifted off the Mouse Dock Pro, falls asleep or wakes, using the dock's own reports, and the moment a cable, dongle or dock is plugged in or removed. With nothing plugged in at all it shows a question mark.
 - Closes any low battery warning as soon as the mouse starts charging.
-- Colours the Mouse Dock Pro's ring by charge level, from red through orange and yellow to green, at a brightness you pick. It turns blue once the mouse reaches 95% on any charger. Or pick any colour of your own, previewed live on the ring as you choose it.
-- Mouse lighting from the tray menu, with the same choices as the ring plus the mouse's own colour cycle, and brightness settings that show only while the light is on. The tray puts it back after the mouse wakes, since the mouse falls back to its own effect when it sleeps.
+- Lights the Mouse Dock Pro's ring in its onboard profile, a colour cycle, by charge level (red through orange and yellow to green, blue once the mouse reaches 95% on any charger), or in any colour of your own, previewed live as you choose it, at a brightness you pick.
+- Mouse lighting from the tray menu, with the same choices as the ring. Brightness settings show only while the tray is setting a light. The tray puts your choice back after the mouse wakes, since the mouse falls back to its own effect when it sleeps.
+- Both lights start on Onboard profile, which shows whatever lighting is saved on the mouse and dock and then leaves them alone, so installing the tray changes nothing until you pick something else. The tray only ever changes the live lighting, never what is saved on the device.
 - Sets the mouse's idle sleep timer from the tray menu.
 - Keeps a battery history in `~/.local/state/razer-naga-tray/battery.csv`, so you can see how fast it drains.
 
@@ -55,7 +56,7 @@ razer-naga-power --idle 120      # sleep after 2 minutes idle (60 to 900 seconds
 
 ## Troubleshooting
 
-Start it with `RAZER_NAGA_TRAY_DEBUG=1 razer-naga-tray` to log every report from the dock and every reading, with timestamps, to the terminal. Include that log with any bug report.
+Start it with `RAZER_NAGA_TRAY_DEBUG=1 razer-naga-tray` to log every report from the dock and every reading, with timestamps, to the terminal. Include that log with any bug report, which you can file from the tray menu's Report a bug item.
 
 ## Credits
 

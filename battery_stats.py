@@ -139,7 +139,9 @@ class Session:
 
     def summary(self, level):
         """One line for the tooltip and menu, or None when there is nothing to say."""
-        if self.source is None or (self.source != "use" and level >= 100):
+        # Drain depends on how the mouse is used and when it sleeps, so only charging gets an ETA.
+        # Drain is still recorded in the curve, for a look at how consistent it is.
+        if self.source in (None, "use") or level >= 100:
             return None
         hours, live_rate = self.remaining_hours(level)
         if hours is None:

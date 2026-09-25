@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tray icon for a Razer Naga V2 Pro: battery level, charging state, low-battery notifications."""
 import json
+import math
 import os
 import queue
 import select
@@ -10,20 +11,32 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-from PyQt6.QtCore import QObject, QRectF, Qt, QTimer, pyqtSignal  # noqa: E402
-from PyQt6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPainterPath, QPalette, QPen, QPixmap  # noqa: E402
+from PyQt6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, QUrl, pyqtSignal  # noqa: E402
+from PyQt6.QtGui import (QAction, QActionGroup, QColor, QConicalGradient, QDesktopServices, QFont, QIcon, QPainter,
+                         QPainterPath,
+                         QPalette, QPen, QPixmap)  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QColorDialog, QMenu, QSystemTrayIcon  # noqa: E402
 
 from battery_stats import Session  # noqa: E402
 from razer_naga import (DOCK_EVENTS, EVENT_INTERFACE, EVENT_REPORT_ID, MouseAsleep, NagaV2Pro,  # noqa: E402
                         EFFECT_NONE, EFFECT_SPECTRUM, EFFECT_STATIC, NoPermission, NoReceiver,
-                        RazerError, dock_set_colour, dock_set_frame, find_links, pct)
+                        RazerError, VERSION, dock_restore_onboard, dock_set_colour, dock_set_cycle,
+                        dock_set_frame, find_links, pct)
 
 POLL_SECONDS = 60
 CHARGING_POLL_SECONDS = 10  # the gauge ticks ~once a minute on charge; time the ticks closely
 WARN_AT = (20, 10, 5)
 IDLE_CHOICES = (60, 120, 300, 600, 900)
 APP_NAME = "Razer mouse"
+ISSUES_URL = "https://github.com/Maelstromeous/razer-naga-tray/issues"
+
+
+def themed(*names):
+    """The first of these the desktop's icon theme has, so the menu matches the rest of the desktop."""
+    for name in names:
+        if QIcon.hasThemeIcon(name):
+            return QIcon.fromTheme(name)
+    return QIcon()
 SHORT_LINK = {"USB cable": "USB", "Mouse Dock Pro": "dock", "wireless dongle": "dongle"}
 HISTORY = os.path.expanduser("~/.local/state/razer-naga-tray/battery.csv")
 SETTINGS = os.path.expanduser("~/.config/razer-naga-tray/settings.json")
@@ -31,11 +44,13 @@ RING_BRIGHTNESS = {"Low": 64, "Medium": 128, "High": 204}
 RING_EVERY = {True: 60, False: 10 * 60}  # seconds between charge-level colour updates, by charging state
 RING_CHARGED_AT, RING_CHARGED = 95, (0, 0, 255)  # on a charger and near full: blue, whatever the source
 LIGHTS = {
-    "dock": ("Dock ring", (("level", "Charge level"), ("custom", "Custom colour…"), ("off", "Off"))),
-    "mouse": ("Mouse lighting", (("cycle", "Colour cycle"), ("level", "Charge level"),
+    "dock": ("Dock ring", (("onboard", "Onboard profile"), ("cycle", "Colour cycle"), ("level", "Charge level"),
+                           ("custom", "Custom colour…"), ("off", "Off"))),
+    "mouse": ("Mouse lighting", (("onboard", "Onboard profile"), ("cycle", "Colour cycle"), ("level", "Charge level"),
                                  ("custom", "Custom colour…"), ("off", "Off"))),
 }
 DEFAULT_COLOUR = (0, 160, 255)
+LIGHT_ICONS = {"dock": ("draw-circle",), "mouse": ("input-mouse",)}
 # Tuned by eye on the dock: its LEDs run green-heavy, so warm shades need far less green than on screen.
 RING_STOPS = ((0, (255, 0, 0)), (15, (255, 30, 0)), (40, (255, 90, 0)), (70, (160, 200, 0)), (100, (0, 255, 0)))
 
@@ -45,9 +60,54 @@ def led_colour(rgb):
     return tuple(round(255 * (c / 255) ** 2.2) for c in rgb)
 
 
+def screen_colour(led_rgb):
+    """Undo led_colour, so a menu swatch looks like the light rather than the raw LED values."""
+    return tuple(round(255 * (c / 255) ** (1 / 2.2)) for c in led_rgb)
+
+
+def _dot(paint):
+    pix = QPixmap(32, 32)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(QPen(QColor(0, 0, 0, 90), 1.5))
+    p.setBrush(paint)
+    p.drawEllipse(QRectF(4, 4, 24, 24))
+    p.end()
+    return QIcon(pix)
+
+
 def swatch(rgb):
-    pix = QPixmap(16, 16)
-    pix.fill(QColor(*rgb))
+    return _dot(QColor(*rgb))
+
+
+def rainbow():
+    gradient = QConicalGradient(16, 16, 0)
+    for i, hue in enumerate(range(0, 361, 60)):
+        gradient.setColorAt(i / 6, QColor.fromHsv(hue % 360, 230, 255))
+    return _dot(gradient)
+
+
+def sun(step, colour):
+    """Brightness icons: a dot with rays that grow from Low (step 0) to High (step 2)."""
+    pix = QPixmap(32, 32)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(colour)
+    core = 4 + step
+    p.drawEllipse(QRectF(16 - core, 16 - core, core * 2, core * 2))
+    pen = QPen(colour, 2.2)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(pen)
+    inner = core + 3
+    outer = inner + 2 + 2.5 * step
+    for i in range(8):
+        a = math.tau * i / 8
+        p.drawLine(QPointF(16 + inner * math.cos(a), 16 + inner * math.sin(a)),
+                   QPointF(16 + outer * math.cos(a), 16 + outer * math.sin(a)))
+    p.end()
     return QIcon(pix)
 
 
@@ -183,7 +243,9 @@ def render_icon(level, charging, stale, plain=None):
         p.setBrush(QColor("#1b1e20"))
         p.drawPath(path)
     p.end()
-    return QIcon(pix)
+    icon = QIcon(pix)
+    icon.addPixmap(pix, QIcon.Mode.Disabled)  # the menu's status line is disabled, and must not grey the battery
+    return icon
 
 
 class Reader(QObject):
@@ -228,6 +290,11 @@ class Reader(QObject):
         except RazerError as e:
             self.mouse.close()
             return {"state": "error", "error": str(e)}
+        except Exception as e:  # a bug in one job must not stop every read after it
+            import traceback
+            traceback.print_exc()
+            self.mouse.close()
+            return {"state": "error", "error": f"internal error: {e}"}
 
 
 class DockWatcher(QObject):
@@ -314,7 +381,7 @@ def read_status(mouse):
     raw = mouse.battery_raw()
     # Only the battery is essential; a failed extra read must not throw it away.
     return {"state": "ok", "raw": raw, "charging": optional(mouse.charging),
-            "idle": optional(mouse.idle_time), "lighting": optional(mouse.lighting_on), "link": mouse.link}
+            "idle": optional(mouse.idle_time), "link": mouse.link}
 
 
 class Tray:
@@ -335,7 +402,8 @@ class Tray:
         self.settings = load_settings()
         self.sent = {"dock": None, "mouse": None}  # what each light was last told to show
         self.sent_at = {"dock": 0, "mouse": 0}
-        self.settings.setdefault("dock_mode", "level")
+        for target in LIGHTS:
+            self.settings.setdefault(f"{target}_mode", "onboard")  # a fresh install changes nothing
         self.previewing = None  # the light a colour dialog is previewing on
         self.last_state = None
         self.blinking = False
@@ -347,7 +415,6 @@ class Tray:
         self.icon = QSystemTrayIcon(render_icon(None, False, True))
         self.icon.setToolTip(f"{APP_NAME}: reading…")
         self.icon.setContextMenu(self.build_menu())
-        self.icon.activated.connect(lambda reason: self.refresh() if reason == QSystemTrayIcon.ActivationReason.Trigger else None)
         self.icon.show()
 
         # The charging state follows the dock report by ~2.5 s, so read now and again after it.
@@ -368,10 +435,9 @@ class Tray:
         self.eta_action.setEnabled(False)
         self.eta_action.setVisible(False)
         menu.addSeparator()
-        menu.addAction("Refresh now", self.refresh)
         self.light_menus = {target: self.build_light_menu(menu, target) for target in LIGHTS}
 
-        idle_menu = menu.addMenu("Sleep when idle for")
+        idle_menu = menu.addMenu(themed("system-suspend", "weather-clear-night"), "Sleep when idle for")
         self.idle_group = QActionGroup(idle_menu)
         self.idle_actions = {}
         for seconds in IDLE_CHOICES:
@@ -382,7 +448,11 @@ class Tray:
             self.idle_actions[seconds] = action
 
         menu.addSeparator()
-        menu.addAction("Quit", self.app.quit)
+        menu.addAction(themed("tools-report-bug"), "Report a bug…", lambda: QDesktopServices.openUrl(QUrl(ISSUES_URL)))
+        version = menu.addAction(themed("help-about"), f"razer-naga-tray {VERSION}")
+        version.setEnabled(False)
+        menu.addSeparator()
+        menu.addAction(themed("application-exit"), "Quit", self.app.quit)
         self.menu = menu
         return menu
 
@@ -401,11 +471,13 @@ class Tray:
 
     def build_light_menu(self, menu, target):
         title, modes = LIGHTS[target]
-        sub = menu.addMenu(title)
+        sub = menu.addMenu(themed(*LIGHT_ICONS[target]), title)
         mode_group, brightness_group = QActionGroup(sub), QActionGroup(sub)
         actions = {"modes": {}, "brightness": []}
         for mode, label in modes:
             action = QAction(label, sub, checkable=True)
+            if mode == "cycle":
+                action.setIcon(rainbow())
             if mode == "custom":
                 action.triggered.connect(lambda _: self.pick_colour(target))
                 if f"{target}_colour" in self.settings:
@@ -416,8 +488,8 @@ class Tray:
             sub.addAction(action)
             actions["modes"][mode] = action
         actions["separator"] = sub.addSeparator()
-        for name in RING_BRIGHTNESS:
-            action = QAction(f"{name} brightness", sub, checkable=True)
+        for step, name in enumerate(RING_BRIGHTNESS):
+            action = QAction(sun(step, panel_colour()), f"{name} brightness", sub, checkable=True)
             action.setChecked(self.settings.get(f"{target}_brightness", "Medium") == name)
             action.triggered.connect(lambda _, name=name: self.set_light_brightness(target, name))
             brightness_group.addAction(action)
@@ -433,7 +505,7 @@ class Tray:
         actions, mode = self.light_menus[target], self.settings.get(f"{target}_mode")
         for m, action in actions["modes"].items():
             action.setChecked(m == mode)
-        lit = mode not in (None, "off")
+        lit = mode not in ("off", "onboard")  # onboard sets nothing, brightness included
         actions["separator"].setVisible(lit)
         for action in actions["brightness"]:
             action.setVisible(lit)
@@ -488,19 +560,28 @@ class Tray:
             return
         mode = self.settings.get(f"{target}_mode")
         brightness = self.brightness(target)
-        if mode is None:
-            return  # the mouse's mode is learned from its first reading
+        level_rgb = None
+        if self.level is not None:
+            charged = self.charging and self.level >= RING_CHARGED_AT
+            level_rgb = RING_CHARGED if charged else ring_colour(self.level)
+            # Shown whatever the mode, so the menu previews what Charge level would look like.
+            self.light_menus[target]["modes"]["level"].setIcon(swatch(screen_colour(level_rgb)))
+        if mode == "onboard":
+            # Put the saved profile back on once, then hands off.
+            if self.sent[target] != ("onboard",):
+                self.sent[target] = ("onboard",)
+                self.reader.run(lambda mouse: self.restore_light(target, mouse))
+            return
         if mode == "off":
             wanted = (EFFECT_NONE, (0, 0, 0), 0)
         elif mode == "cycle":
             wanted = (EFFECT_SPECTRUM, None, brightness)
         elif mode == "custom":
             wanted = (EFFECT_STATIC, led_colour(self.settings.get(f"{target}_colour", DEFAULT_COLOUR)), brightness)
-        elif self.level is None:
+        elif level_rgb is None:
             return
         else:
-            charged = self.charging and self.level >= RING_CHARGED_AT
-            wanted = (EFFECT_STATIC, RING_CHARGED if charged else ring_colour(self.level), brightness)
+            wanted = (EFFECT_STATIC, level_rgb, brightness)
         wanted += (self.charging, mode)
         sent = self.sent[target]
         if wanted == sent:
@@ -514,15 +595,33 @@ class Tray:
         self.reader.run(lambda mouse: self.write_light(target, mouse, wanted))
 
     @staticmethod
+    def restore_light(target, mouse):
+        if target == "dock":
+            return {"state": "light", "target": target, "ok": dock_restore_onboard()}
+        try:
+            if mouse.fd is None:
+                mouse.connect()
+            mouse.restore_onboard()
+            ok = True
+        except (MouseAsleep, NoReceiver):
+            ok = False
+        except RazerError:
+            ok = True  # a profile the mouse will not read back is left as it is, not retried forever
+        return {"state": "light", "target": target, "ok": ok}
+
+    @staticmethod
     def write_light(target, mouse, wanted):
         effect, rgb, brightness = wanted[:3]
         if target == "dock":
-            dock_set_colour(rgb, brightness)
+            if effect == EFFECT_SPECTRUM:
+                dock_set_cycle(brightness)
+            else:
+                dock_set_colour(rgb, brightness)
             return {"state": "light", "target": target, "ok": True}
         try:
             if mouse.fd is None:
                 mouse.connect()
-            ok = any(mouse.set_led(effect, rgb, brightness).values())
+            ok = any(mouse.set_led(effect, rgb, brightness, save=False).values())
         except (MouseAsleep, NoReceiver):
             ok = False  # asleep or unplugged: resent after the next good reading
         return {"state": "light", "target": target, "ok": ok}
@@ -559,11 +658,6 @@ class Tray:
                 self.timer.start(interval)
             if result["idle"] is not None:
                 self.idle = result["idle"]
-            if "mouse_mode" not in self.settings and result["lighting"] is not None:
-                # First run: adopt whatever the mouse is already doing rather than change it.
-                self.settings["mouse_mode"] = "cycle" if result["lighting"] else "off"
-                save_settings(self.settings)
-                self.show_light_mode("mouse")
             self.last_read = time.time()
             self.log_reading()
             self.check_notifications(previous)
@@ -581,9 +675,11 @@ class Tray:
         self.eta_action.setVisible(bool(self.eta))
         # Asleep keeps the last reading, greyed; with no receiver at all there is nothing to show.
         shown = None if state == "no-receiver" else self.level
-        self.icon.setIcon(render_icon(shown, self.charging and not stale, stale))
+        battery = render_icon(shown, self.charging and not stale, stale)
+        self.icon.setIcon(battery)
         summary = self.describe(state, result.get("error"))
-        self.icon.setToolTip(summary)
+        self.icon.setToolTip(f"🔋 {summary}")
+        self.status_action.setIcon(battery)
         self.status_action.setText(summary.splitlines()[0])
 
     def log_reading(self):
@@ -601,12 +697,12 @@ class Tray:
 
     def describe(self, state, error):
         if self.level is None:
-            known = "Battery unknown"
+            known = "Unknown"
         else:
-            known = f"Battery {self.level}%" + (", charging" if self.charging else "")
+            known = f"{self.level}%" + (", charging" if self.charging else "")
         if state == "ok":
             via = SHORT_LINK.get(self.link, self.link)
-            line = f"Battery {self.level}%, " + (f"charging via {via}" if self.charging else f"connected to {via}")
+            line = f"{self.level}%, " + (f"charging via {via}" if self.charging else f"connected to {via}")
             return line + (f"\n{self.eta}" if self.eta else "")
         if state == "no-receiver":
             return "Mouse not connected\nNo dock, dongle or cable found"

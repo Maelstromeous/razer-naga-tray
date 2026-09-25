@@ -5,7 +5,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-from razer_naga import LEDS, NagaV2Pro, RazerError, pct  # noqa: E402
+from razer_naga import LEDS, VERSION, NagaV2Pro, RazerError, pct  # noqa: E402
 
 
 def attempt(label, read):
@@ -17,6 +17,7 @@ def attempt(label, read):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--version", action="version", version=f"razer-naga-power {VERSION}")
     lighting = parser.add_mutually_exclusive_group()
     lighting.add_argument("--lights-off", action="store_true", help="switch the lighting off and save it to the mouse")
     lighting.add_argument("--lights-on", action="store_true", help="colour cycling at 33%%, saved to the mouse")

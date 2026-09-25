@@ -8,6 +8,7 @@ import glob
 import os
 import time
 
+VERSION = "1.0.0"
 VENDOR = "00001532"
 # Probe order: dock first, it is the usual link here.
 LINKS = {"000000A4": "Mouse Dock Pro", "000000A8": "wireless dongle", "000000A7": "USB cable"}
@@ -176,8 +177,9 @@ class NagaV2Pro:
     def lighting_on(self):
         return any(self.led_brightness(led) for led in LEDS.values())
 
-    def set_led(self, effect, rgb=None, brightness=0):
-        """One effect on every LED, live and saved. Returns {led name: True if the mouse accepted it}."""
+    def set_led(self, effect, rgb=None, brightness=0, save=True):
+        """One effect on every LED, live, and saved unless save is False, which leaves the onboard
+        profile alone. Returns {led name: True if the mouse accepted it}."""
         if effect == EFFECT_STATIC:
             size, extra = 0x09, (0x00, 0x00, 0x01, *rgb)
         else:
@@ -185,8 +187,8 @@ class NagaV2Pro:
         result = {}
         for name, led in LEDS.items():
             try:
-                # Saving alone leaves the LED as it was until the next power cycle, so set both.
-                for store in (NOSTORE, VARSTORE):
+                # Saving alone leaves the LED as it was until the next power cycle, so live is always set.
+                for store in (NOSTORE, VARSTORE) if save else (NOSTORE,):
                     self.request(0x0F, 0x02, size, (store, led, effect, *extra))
                     self.request(0x0F, 0x04, 0x03, (store, led, brightness))
                 result[name] = True
@@ -195,6 +197,14 @@ class NagaV2Pro:
             except RazerError:
                 result[name] = False
         return result
+
+    def restore_onboard(self):
+        """Copy the saved (onboard profile) lighting onto the live lighting, so it shows straight away."""
+        for led in LEDS.values():
+            saved = self.request(0x0F, 0x82, 0x0C, (VARSTORE, led))
+            brightness = self.request(0x0F, 0x84, 0x03, (VARSTORE, led))[2]
+            self.request(0x0F, 0x02, 0x0C, (NOSTORE, led, *saved[2:12]))
+            self.request(0x0F, 0x04, 0x03, (NOSTORE, led, brightness))
 
     def set_lighting(self, on):
         return self.set_led(EFFECT_SPECTRUM, brightness=ON_BRIGHTNESS) if on else self.set_led(EFFECT_NONE)
@@ -206,18 +216,23 @@ DOCK_LED = 0x00
 
 def dock_command(command_class, command_id, data_size, args=()):
     """Send one command to the Mouse Dock Pro itself. Returns True if it was accepted."""
+    return dock_request(command_class, command_id, data_size, args) is not None
+
+
+def dock_request(command_class, command_id, data_size, args=()):
+    """Send one command to the Mouse Dock Pro itself. Returns the reply's arguments, or None."""
     path = next((p for p, name in find_links() if name == "Mouse Dock Pro"), None)
     if not path:
-        return False
+        return None
     try:
         fd = os.open(path, os.O_RDWR)
     except OSError:
-        return False
+        return None
     try:
-        status, _ = NagaV2Pro._send(fd, command_class, command_id, data_size, args, DOCK_TRANSACTION_ID)
-        return status == 0x02
+        status, data = NagaV2Pro._send(fd, command_class, command_id, data_size, args, DOCK_TRANSACTION_ID)
+        return data if status == 0x02 else None
     except OSError:
-        return False  # unplugged mid-write
+        return None  # unplugged mid-write
     finally:
         os.close(fd)
 
@@ -237,3 +252,18 @@ def dock_set_frame(rgb):
     once every time, so it is what blinks."""
     return (dock_command(0x0F, 0x03, 5 + 24, [0, 0, 0, 0, 7] + list(rgb) * 8)
             and dock_command(0x0F, 0x02, 0x0C, (0x00, 0x00, 0x08)))
+
+
+def dock_set_cycle(brightness):
+    """The dock's own colour cycle, live only, sent twice like the static colour."""
+    ok = dock_command(0x0F, 0x04, 0x03, (NOSTORE, DOCK_LED, brightness))
+    for _ in range(2):
+        ok &= dock_command(0x0F, 0x02, 0x06, (NOSTORE, DOCK_LED, EFFECT_SPECTRUM))
+    return ok
+
+
+def dock_restore_onboard():
+    """Copy the dock's saved effect onto its live one. Its saved brightness reads back as 0 whatever it
+    is, so the live brightness is left alone."""
+    saved = dock_request(0x0F, 0x82, 0x0C, (VARSTORE, DOCK_LED))
+    return saved is not None and dock_command(0x0F, 0x02, 0x0C, (NOSTORE, DOCK_LED, *saved[2:12]))
