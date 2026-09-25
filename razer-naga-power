@@ -5,7 +5,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-from razer_naga import LEDS, NagaV2Pro, RazerError  # noqa: E402
+from razer_naga import LEDS, NagaV2Pro, RazerError, pct  # noqa: E402
 
 
 def attempt(label, read):
@@ -35,7 +35,7 @@ def main():
     except RazerError as e:
         sys.exit(str(e))
 
-    attempt("Battery:", lambda: f"{mouse.battery()}%")
+    attempt("Battery:", lambda: (lambda raw: f"{pct(raw)}% (raw {raw}/255)")(mouse.battery_raw()))
     attempt("Charging:", lambda: "yes" if mouse.charging() else "no")
     attempt("Sleeps after idle:", lambda: f"{mouse.idle_time()} s")
     attempt("Low-battery mode at:", lambda: f"{mouse.low_battery_threshold()}%")

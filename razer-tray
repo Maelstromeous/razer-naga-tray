@@ -13,8 +13,9 @@ from PyQt6.QtCore import QObject, QRectF, Qt, QTimer, pyqtSignal  # noqa: E402
 from PyQt6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon  # noqa: E402
 
+from battery_stats import Session  # noqa: E402
 from razer_naga import (DOCK_EVENTS, EVENT_INTERFACE, EVENT_REPORT_ID, MouseAsleep, NagaV2Pro,  # noqa: E402
-                        NoPermission, NoReceiver, RazerError, find_links)
+                        NoPermission, NoReceiver, RazerError, find_links, pct)
 
 POLL_SECONDS = 60
 WARN_AT = (20, 10, 5)
@@ -23,8 +24,23 @@ APP_NAME = "Razer mouse"
 HISTORY = os.path.expanduser("~/.local/state/razer-tray/battery.csv")
 
 
-def notify(title, body, urgency="normal"):
-    subprocess.Popen(["notify-send", "-a", APP_NAME, "-i", "input-mouse", "-u", urgency, title, body])
+def notify(title, body, urgency="normal", replaces=None):
+    """Returns the notification id, so it can be replaced or closed later."""
+    cmd = ["notify-send", "-p", "-a", APP_NAME, "-i", "input-mouse", "-u", urgency, title, body]
+    if replaces:
+        cmd[2:2] = ["-r", str(replaces)]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout.strip()
+        return int(out) if out.isdigit() else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def close_notification(notification_id):
+    subprocess.Popen(["gdbus", "call", "--session", "--dest", "org.freedesktop.Notifications",
+                      "--object-path", "/org/freedesktop/Notifications",
+                      "--method", "org.freedesktop.Notifications.CloseNotification", str(notification_id)],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def level_colour(level):
@@ -109,13 +125,35 @@ class Reader(QObject):
 
 
 class DockWatcher(QObject):
-    """Listens for the receiver's own dock/undock reports, so the tray reacts without waiting for a poll."""
+    """Listens for dock/undock reports and USB plugging, so the tray reacts without waiting for a poll."""
 
     changed = pyqtSignal()
+    relinked = pyqtSignal()
 
     def __init__(self):
         super().__init__()
+        self.udev = self._udev_monitor()
+        self.known_links = set(find_links())
         threading.Thread(target=self._watch, daemon=True).start()
+
+    @staticmethod
+    def _udev_monitor():
+        try:
+            import pyudev
+        except ImportError:
+            return None  # plugging is then noticed by the 30 s rescan below
+        monitor = pyudev.Monitor.from_netlink(pyudev.Context())
+        monitor.filter_by("hidraw")
+        monitor.start()
+        return monitor
+
+    def _plugged(self):
+        """Drain udev events; True if the set of Razer receivers and cables changed."""
+        while self.udev.poll(timeout=0) is not None:
+            pass
+        links = set(find_links())
+        changed, self.known_links = links != self.known_links, links
+        return changed
 
     def _watch(self):
         fds = {}
@@ -126,16 +164,22 @@ class DockWatcher(QObject):
                         fds[os.open(path, os.O_RDONLY | os.O_NONBLOCK)] = path
                     except OSError:
                         pass
-                if not fds:
+                if not fds and not self.udev:
                     time.sleep(10)  # receiver unplugged or no permission yet
                     continue
-            ready, _, _ = select.select(list(fds), [], [], 30)
-            if not ready and {p for p, _ in find_links(EVENT_INTERFACE)} != set(fds.values()):
+            watched = list(fds) + ([self.udev] if self.udev else [])
+            ready, _, _ = select.select(watched, [], [], 30)
+            plugged = self.udev in ready and self._plugged()
+            rescan = fds and not ready and {p for p, _ in find_links(EVENT_INTERFACE)} != set(fds.values())
+            if plugged or rescan:
                 for stale in fds:
                     os.close(stale)
                 fds = {}
+                self.relinked.emit()
                 continue
             for fd in ready:
+                if fd is self.udev:
+                    continue
                 try:
                     report = os.read(fd, 64)
                 except BlockingIOError:
@@ -160,9 +204,9 @@ def optional(read):
 def read_status(mouse):
     if mouse.fd is None:
         mouse.connect()
-    battery = mouse.battery()
+    raw = mouse.battery_raw()
     # Only the battery is essential; a failed extra read must not throw it away.
-    return {"state": "ok", "battery": battery, "charging": optional(mouse.charging),
+    return {"state": "ok", "raw": raw, "charging": optional(mouse.charging),
             "idle": optional(mouse.idle_time), "lighting": optional(mouse.lighting_on), "link": mouse.link}
 
 
@@ -178,6 +222,10 @@ class Tray:
         self.told_full = False
         self.told_permission = False
         self.last_logged = None
+        self.raw = None
+        self.low_notification = None
+        self.session = Session()
+        self.session.load(HISTORY)
 
         self.reader = Reader()
         self.reader.finished.connect(self.on_result)
@@ -190,7 +238,8 @@ class Tray:
 
         # The charging state follows the dock report by ~2.5 s, so read now and again after it.
         self.watcher = DockWatcher()
-        self.watcher.changed.connect(lambda: [QTimer.singleShot(ms, self.refresh) for ms in (300, 3500)])
+        self.watcher.changed.connect(self.refresh_soon)
+        self.watcher.relinked.connect(self.relink)
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.refresh)
@@ -201,6 +250,9 @@ class Tray:
         menu = QMenu()
         self.status_action = menu.addAction("Reading…")
         self.status_action.setEnabled(False)
+        self.eta_action = menu.addAction("")
+        self.eta_action.setEnabled(False)
+        self.eta_action.setVisible(False)
         menu.addSeparator()
         menu.addAction("Refresh now", self.refresh)
         lighting_menu = menu.addMenu("Lighting")
@@ -231,6 +283,15 @@ class Tray:
     def refresh(self):
         self.reader.poll()
 
+    def refresh_soon(self):
+        for ms in (300, 3500):
+            QTimer.singleShot(ms, self.refresh)
+
+    def relink(self):
+        """A receiver or cable came or went: drop the current link so the probe order picks again."""
+        self.reader.run(lambda mouse: mouse.close() or read_status(mouse))
+        self.refresh_soon()
+
     def set_lighting(self, on):
         def job(mouse):
             if mouse.fd is None:
@@ -249,9 +310,11 @@ class Tray:
     def on_result(self, result):
         state = result["state"]
         if state == "ok":
-            self.level, self.link = result["battery"], result["link"]
+            self.raw, self.link = result["raw"], result["link"]
+            self.level = pct(self.raw)
             if result["charging"] is not None:
                 self.charging = result["charging"]
+            self.session.add(time.time(), self.raw, self.charging)
             if result["idle"] is not None:
                 self.idle = result["idle"]
             if result["lighting"] is not None:
@@ -266,21 +329,24 @@ class Tray:
             notify("Can't read the mouse", result["error"], "critical")
 
         stale = state != "ok"
+        self.eta = None if stale else self.session.summary(time.time(), self.raw)
+        self.eta_action.setText(self.eta or "")
+        self.eta_action.setVisible(bool(self.eta))
         self.icon.setIcon(render_icon(self.level, self.charging and not stale, stale))
         summary = self.describe(state, result.get("error"))
         self.icon.setToolTip(summary)
         self.status_action.setText(summary.splitlines()[0])
 
     def log_reading(self):
-        """Append to the history whenever the level or charging changes, to measure the drain rate."""
-        reading = (self.level, self.charging)
+        """Append to the history whenever the raw level or charging changes; battery_stats reads it back."""
+        reading = (self.raw, self.charging)
         if reading == self.last_logged:
             return
         self.last_logged = reading
         try:
             os.makedirs(os.path.dirname(HISTORY), exist_ok=True)
             with open(HISTORY, "a") as f:
-                f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')},{self.level},{int(self.charging)},{self.link}\n")
+                f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')},{self.level},{int(self.charging)},{self.link},{self.raw}\n")
         except OSError:
             pass
 
@@ -290,7 +356,7 @@ class Tray:
         else:
             known = f"Battery {self.level}%" + (", charging" if self.charging else "")
         if state == "ok":
-            return f"{known}\nVia the {self.link}"
+            return f"{known}\n" + (f"{self.eta}\n" if self.eta else "") + f"Via the {self.link}"
         age = f" (as of {time.strftime('%H:%M', time.localtime(self.last_read))})" if self.last_read else ""
         reason = {"asleep": "Mouse asleep or out of range", "no-receiver": "No dock or dongle found"}.get(state, error)
         return f"{known}{age}\n{reason}"
@@ -298,6 +364,9 @@ class Tray:
     def check_notifications(self):
         if self.charging:
             self.warned.clear()
+            if self.low_notification:
+                close_notification(self.low_notification)
+                self.low_notification = None
             if self.level >= 100 and not self.told_full:
                 self.told_full = True
                 notify("Mouse fully charged", "You can take it off the dock.")
@@ -306,8 +375,10 @@ class Tray:
         crossed = {t for t in WARN_AT if self.level <= t}
         if crossed - self.warned:
             self.warned |= crossed
-            notify(f"Mouse battery at {self.level}%", "Put it on the dock to charge.",
-                   "critical" if min(crossed) <= 10 else "normal")
+            # Each warning replaces the last, so charging has only one to dismiss.
+            self.low_notification = notify(f"Mouse battery at {self.level}%", "Put it on the dock to charge.",
+                                           "critical" if min(crossed) <= 10 else "normal",
+                                           replaces=self.low_notification)
 
 
 def main():

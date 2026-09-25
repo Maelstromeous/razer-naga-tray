@@ -8,15 +8,19 @@ It talks to the mouse over raw HID, so it needs no OpenRazer kernel driver. That
 
 - Shows the battery level in the tray, coloured by level, and blue while charging.
 - Sends a notification at 20%, 10% and 5%, and when the mouse is fully charged.
-- Updates the moment the mouse is placed on or lifted off the Mouse Dock Pro, using the dock's own reports.
+- Estimates the time to full while charging, and the time left and drain rate per hour while in use.
+- Updates the moment the mouse is placed on or lifted off the Mouse Dock Pro, using the dock's own reports, and the moment a cable, dongle or dock is plugged in or removed.
+- Closes any low battery warning as soon as the mouse starts charging.
 - Switches the mouse lighting on or off and sets the idle sleep timer from the tray menu.
 - Keeps a battery history in `~/.local/state/razer-tray/battery.csv`, so you can see how fast it drains.
+
+The mouse reports its battery in 255 steps, about 0.4% each. The estimates are fitted over the last 20 minutes of charging or 3 hours of use, and ignore the first few minutes after a charger connects, when the reading jumps. Expect the time to full to run a little optimistic near the top, where the battery charges more slowly.
 
 It works through the Mouse Dock Pro, the HyperSpeed wireless dongle or a USB cable, whichever the mouse answers on.
 
 ## Requirements
 
-Python 3 with PyQt6, and `notify-send` (libnotify).
+Python 3 with PyQt6, `notify-send` (libnotify) and `gdbus`. With pyudev installed, plugging is noticed instantly; without it, within 30 seconds.
 
 ## Install
 

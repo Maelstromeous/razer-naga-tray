@@ -142,8 +142,12 @@ class NagaV2Pro:
             raise RazerError(STATUS.get(status, hex(status)))
         return data
 
+    def battery_raw(self):
+        """0-255; one step is ~0.4%, finer than the percentage."""
+        return self.request(0x07, 0x80, 0x02)[1]
+
     def battery(self):
-        return pct(self.request(0x07, 0x80, 0x02)[1])
+        return pct(self.battery_raw())
 
     def charging(self):
         return bool(self.request(0x07, 0x84, 0x02)[1])
