@@ -1,0 +1,1 @@
+- [Swap in new builds](swap-in-new-builds.md) — after building a tray change, stop the packaged tray and run the repo build
