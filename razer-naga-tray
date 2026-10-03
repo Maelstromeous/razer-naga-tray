@@ -17,6 +17,7 @@ from PyQt6.QtGui import (QAction, QActionGroup, QColor, QConicalGradient, QDeskt
                          QPalette, QPen, QPixmap)  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QColorDialog, QMenu, QSystemTrayIcon  # noqa: E402
 
+import battery_graph  # noqa: E402
 from battery_stats import Session  # noqa: E402
 from razer_naga import (DOCK_EVENTS, EVENT_INTERFACE, EVENT_REPORT_ID, MouseAsleep, NagaV2Pro,  # noqa: E402
                         EFFECT_NONE, EFFECT_SPECTRUM, EFFECT_STATIC, NoPermission, NoReceiver,
@@ -427,6 +428,12 @@ class Tray:
         self.timer.start(POLL_SECONDS * 1000)
         self.refresh()
 
+        self.graph = None
+        battery_graph.prune()
+        self.pruned_at = time.time()
+        self.sampler = QTimer(interval=battery_graph.SAMPLE_SECONDS * 1000, timeout=self.sample)
+        self.sampler.start()
+
     def build_menu(self):
         menu = QMenu()
         self.status_action = menu.addAction("Reading…")
@@ -447,6 +454,10 @@ class Tray:
             idle_menu.addAction(action)
             self.idle_actions[seconds] = action
 
+        history_menu = menu.addMenu(themed("office-chart-line", "view-statistics", "utilities-system-monitor"),
+                                    "Battery history")
+        history_menu.addAction(themed("office-chart-bar", "view-statistics"), "Graph…", self.show_graph)
+
         menu.addSeparator()
         menu.addAction(themed("tools-report-bug"), "Report a bug…", lambda: QDesktopServices.openUrl(QUrl(ISSUES_URL)))
         version = menu.addAction(themed("help-about"), f"razer-naga-tray {VERSION}")
@@ -458,6 +469,23 @@ class Tray:
 
     def refresh(self):
         self.reader.poll()
+
+    def sample(self):
+        """One timeline row a minute, whatever state the mouse is in."""
+        if self.last_state is None:
+            return
+        away = self.last_state == "no-receiver"
+        battery_graph.record(self.last_state, None if away else self.level, self.charging, self.link)
+        if time.time() - self.pruned_at > 86400:
+            battery_graph.prune()
+            self.pruned_at = time.time()
+
+    def show_graph(self):
+        if self.graph is None:
+            self.graph = battery_graph.GraphWindow()
+        self.graph.show()
+        self.graph.raise_()
+        self.graph.activateWindow()
 
     def refresh_soon(self):
         for ms in (300, 3500):

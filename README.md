@@ -16,6 +16,7 @@ It talks to the mouse over raw HID, so it needs no OpenRazer kernel driver. That
 - Both lights start on Onboard profile, which shows whatever lighting is saved on the mouse and dock and then leaves them alone, so installing the tray changes nothing until you pick something else. The tray only ever changes the live lighting, never what is saved on the device.
 - Sets the mouse's idle sleep timer from the tray menu.
 - Keeps a battery history in `~/.local/state/razer-naga-tray/battery.csv`, so you can see how fast it drains.
+- Graphs the last 24 hours or 7 days from the tray menu's Battery history item: the level as bars, with a strip underneath showing when the mouse was on the dock, on a cable, on battery, asleep or not connected. It samples once a minute into `~/.local/state/razer-naga-tray/timeline.csv` and keeps 7 days.
 
 The mouse's battery gauge moves in whole percents, ticking about once a minute on the cable. While charging the tray checks every 10 seconds to time those ticks. Batteries charge and drain on a curve rather than a straight line, so the tray learns how long each percent takes at each level, separately for the cable, the dock and normal use, from its own history. Estimates follow that curve, adjusted to how the current session compares. The first charge relies on the live rate and runs optimistic near the top; each full charge after that sharpens it.
 

@@ -15,7 +15,7 @@ package() {
   cd "$pkgname-$pkgver"
   local lib="/usr/lib/$pkgname"
 
-  install -Dm644 razer_naga.py battery_stats.py -t "$pkgdir$lib/"
+  install -Dm644 razer_naga.py battery_stats.py battery_graph.py -t "$pkgdir$lib/"
   install -Dm755 razer-naga-tray razer-naga-power -t "$pkgdir$lib/"
   python -m compileall -q -d "$lib" "$pkgdir$lib"
 
