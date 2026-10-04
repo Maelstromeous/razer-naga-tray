@@ -454,9 +454,8 @@ class Tray:
             idle_menu.addAction(action)
             self.idle_actions[seconds] = action
 
-        history_menu = menu.addMenu(themed("office-chart-line", "view-statistics", "utilities-system-monitor"),
-                                    "Battery history")
-        history_menu.addAction(themed("office-chart-bar", "view-statistics"), "Graph…", self.show_graph)
+        menu.addAction(themed("office-chart-line", "view-statistics", "utilities-system-monitor"), "Battery history…",
+                       self.show_graph)
 
         menu.addSeparator()
         menu.addAction(themed("tools-report-bug"), "Report a bug…", lambda: QDesktopServices.openUrl(QUrl(ISSUES_URL)))
