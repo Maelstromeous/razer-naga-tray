@@ -491,12 +491,12 @@ class Tray:
             QTimer.singleShot(ms, self.refresh)
 
     def docked(self):
-        """Docking and undocking put the dock back on its saved effect, so resend its colour once it settles."""
+        """Docking and undocking can switch the dock and the mouse to their own effects, so resend both."""
         for ms in (300, 3500, 8000):
-            QTimer.singleShot(ms, self.resend_dock)
+            QTimer.singleShot(ms, self.resend_lights)
 
-    def resend_dock(self):
-        self.sent["dock"] = None
+    def resend_lights(self):
+        self.sent = dict.fromkeys(self.sent)
         self.refresh()
 
     def relink(self):
