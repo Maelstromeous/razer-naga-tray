@@ -420,7 +420,7 @@ class Tray:
 
         # The charging state follows the dock report by ~2.5 s, so read now and again after it.
         self.watcher = DockWatcher()
-        self.watcher.changed.connect(self.refresh_soon)
+        self.watcher.changed.connect(self.docked)
         self.watcher.relinked.connect(self.relink)
 
         self.timer = QTimer()
@@ -489,6 +489,15 @@ class Tray:
     def refresh_soon(self):
         for ms in (300, 3500):
             QTimer.singleShot(ms, self.refresh)
+
+    def docked(self):
+        """Docking and undocking can switch the dock and the mouse to their own effects, so resend both."""
+        for ms in (300, 3500, 8000):
+            QTimer.singleShot(ms, self.resend_lights)
+
+    def resend_lights(self):
+        self.sent = dict.fromkeys(self.sent)
+        self.refresh()
 
     def relink(self):
         """A receiver or cable came or went: drop the current link so the probe order picks again."""
@@ -640,11 +649,8 @@ class Tray:
     def write_light(target, mouse, wanted):
         effect, rgb, brightness = wanted[:3]
         if target == "dock":
-            if effect == EFFECT_SPECTRUM:
-                dock_set_cycle(brightness)
-            else:
-                dock_set_colour(rgb, brightness)
-            return {"state": "light", "target": target, "ok": True}
+            ok = dock_set_cycle(brightness) if effect == EFFECT_SPECTRUM else dock_set_colour(rgb, brightness)
+            return {"state": "light", "target": target, "ok": ok}
         try:
             if mouse.fd is None:
                 mouse.connect()
